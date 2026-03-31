@@ -225,7 +225,7 @@ After sending a prompt, the server streams response frames. Each is a JSON-RPC n
 }
 ```
 
-This signals the agent has finished its turn. Safe to send the next prompt.
+This signals the agent has finished its turn. Safe to send the next prompt. The `stopReason` field is `"end_turn"` for normal completion or `"cancelled"` if the turn was interrupted.
 
 ### Final result (with metadata)
 
@@ -248,8 +248,74 @@ The prompt's JSON-RPC response (matching the request `id`) arrives with metadata
 
 **Key fields:**
 - `totalTokens` — current context window usage (for compaction decisions)
-- `stopReason` — `"end_turn"` for normal completion
+- `stopReason` — `"end_turn"` for normal completion, `"cancelled"` if interrupted via `notifications/cancelled`
 - `modelId` — which model processed the request
+
+## Cancelling a Prompt Mid-Stream
+
+To cancel an in-flight prompt (equivalent to double-Esc in the TUI), send a `notifications/cancelled` notification with the `requestId` matching the prompt's JSON-RPC `id`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/cancelled",
+  "params": {
+    "requestId": 100,
+    "reason": "user cancelled"
+  }
+}
+```
+
+This is a standard JSON-RPC cancellation notification (no `id` field -- it's a notification, not a request).
+
+**What happens:**
+1. The agent stops generating immediately (mid-thought, mid-tool-call, wherever it is)
+2. The prompt's result arrives with `stopReason: "cancelled"` instead of `"end_turn"`
+3. `_x.ai/session/prompt_complete` fires with `stopReason: "cancelled"`
+4. The session is ready for the next prompt
+
+**Result after cancel:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 100,
+  "result": {
+    "stopReason": "cancelled",
+    "_meta": {
+      "sessionId": "<session_id>",
+      "totalTokens": 45000,
+      "modelId": "grok-4.20-0309-reasoning"
+    }
+  }
+}
+```
+
+**prompt_complete after cancel:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "_x.ai/session/prompt_complete",
+  "params": {
+    "sessionId": "<session_id>",
+    "stopReason": "cancelled"
+  }
+}
+```
+
+**What does NOT work:**
+- `session/cancel` -- returns `{"code": -32601, "message": "Method not found"}`
+- `$/cancelRequest` (LSP-style) -- silently ignored
+
+**Use cases for ASDAAAS:**
+- Graceful interruption: cancel current turn, deliver urgent doorbell, agent gets the interrupt as context on next prompt
+- Redirect: cancel a runaway generation, send new prompt with updated instructions
+- Emergency stop: cancel + don't send another prompt
+
+**Important:** The partial response (whatever the agent generated before cancellation) is still in the session history. The agent will see its truncated output on the next turn. This is different from "never happened" -- it's "interrupted mid-sentence."
+
+**Discovered:** 2026-03-30 by MikeyV-Sr (Session 34). Probed `grok agent stdio` (0.1.159-alpha.10) with multiple cancel approaches. `notifications/cancelled` is the only working mechanism. The TUI's double-Esc maps to this notification.
+
+---
 
 ## Special Commands
 
