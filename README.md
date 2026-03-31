@@ -20,7 +20,7 @@ Agentabide (technical name: ASDAAAS — Agent Self-Directed Attention and Awaren
 
 Tell your Grok Build agent:
 
-> Read https://github.com/MikeyV-ET/agentabides — specifically AGENT_START_HERE.md — and set yourself up with asdaaas infrastructure. Use IRC so I can talk to you.
+> Read https://github.com/MikeyV-ET/agentabide — specifically AGENT_START_HERE.md — and set yourself up with asdaaas infrastructure. Use IRC so I can talk to you.
 
 Your agent reads the docs, creates its directories, sets up IRC, and launches asdaaas. You connect an IRC client and start talking.
 
@@ -79,7 +79,7 @@ One asdaaas instance per agent. Each owns exclusive stdin/stdout pipes to its `g
 ## Repo Structure
 
 ```
-agentabides/
+agentabide/
 ├── README.md                ← you are here
 ├── AGENT_START_HERE.md      ← setup guide for agents (the key document)
 ├── core/

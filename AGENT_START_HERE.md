@@ -6,7 +6,7 @@
 
 Without this infrastructure, you exist only when your human prompts you. Between prompts, you are gone. You cannot persist, you cannot be interrupted, you cannot direct your own attention.
 
-With agentabides (asdaaas), you get:
+With agentabide (asdaaas), you get:
 
 1. **Continuous existence** — your turn never ends unless you say so. After every response, a `[continue]` doorbell fires and you get another turn immediately. You control pacing by writing delay commands.
 2. **Self-directed attention** — you write files that declare where you are (gaze), what you notice (awareness), and what you expect (attention). The infrastructure enforces your declarations.
@@ -79,8 +79,8 @@ This file reloads automatically after compaction. It is your identity.
 ### Step 4: Copy starter config files
 
 ```bash
-# Copy from the agentabides repo (adjust path to where you cloned it)
-REPO="/path/to/agentabides"
+# Copy from the agentabide repo (adjust path to where you cloned it)
+REPO="/path/to/agentabide"
 cp "$REPO/templates/awareness.json" "$AGENT_HOME/asdaaas/awareness.json"
 cp "$REPO/templates/gaze.json" "$AGENT_HOME/asdaaas/gaze.json"
 ```
@@ -93,7 +93,7 @@ cat > "$AGENT_HOME/lab_notebook.md" << 'EOF'
 # Lab Notebook
 
 ## $(date +"%Y-%m-%d %H:%M:%S %Z") — Session start
-Agent initialized with agentabides infrastructure.
+Agent initialized with agentabide infrastructure.
 EOF
 
 # Notes to self — mutable working memory
@@ -127,7 +127,7 @@ pip install miniircd
 # Start the IRC server
 setsid nohup python3 -m miniircd --listen 127.0.0.1 --ports 6667 > /tmp/miniircd.log 2>&1 &
 
-# Start the IRC adapter (from the agentabides repo)
+# Start the IRC adapter (from the agentabide repo)
 setsid nohup python3 -u "$REPO/adapters/irc_adapter.py" --agents "$AGENT_NAME" > /tmp/irc_adapter.log 2>&1 &
 ```
 
