@@ -1,0 +1,4 @@
+{
+  "speech": {"target": "irc", "params": {"room": "#standup"}},
+  "thoughts": null
+}

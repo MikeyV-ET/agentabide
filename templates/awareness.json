@@ -1,0 +1,20 @@
+{
+  "direct_attach": ["irc"],
+  "background_channels": {
+    "#standup": "doorbell"
+  },
+  "background_default": "pending",
+  "heartbeat": {
+    "idle_threshold": 900,
+    "nudge_interval": 600
+  },
+  "context_thresholds": [45, 65, 80, 88],
+  "default_doorbell": true,
+  "doorbell_ttl": {
+    "heartbeat": 1,
+    "remind": 0,
+    "continue": 1,
+    "irc": 3,
+    "default": 5
+  }
+}
