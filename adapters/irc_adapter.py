@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Agentabide IRC Adapter — Multi-nick IRC bridge for asdaaas agents.
-===================================================================
+MikeyV IRC Adapter — Multi-nick IRC bridge using the adapter API.
+=================================================================
 One process, N IRC connections — each agent gets their own nick.
-Auto-discovers agents from running_agents.json or --agents flag.
 
 Routing:
-  Channel messages (#standup) -> broadcast to ALL agents
-  Private messages (/msg AgentName) -> that agent only
+  Channel messages (#standup) → broadcast to ALL agents
+  Private messages (/msg MikeyV-Sr) → that agent only
 
-Requires: miniircd (pip install miniircd) running on localhost.
+That's it. IRC handles targeting. No text parsing.
+
+Architecture:
+  miniircd <── MikeyV-Sr ──┐
+           <── MikeyV-Jr ──┤
+           <── MikeyV-Trip ┼── irc_adapter ──> hub inbox ──> hub ──> leader
+           <── MikeyV-Q ───┤                                  │
+           <── MikeyV-Cinco┘◄── hub outbox/irc/ ◄─────────────┘
 
 Usage:
-  python3 irc_adapter.py                           # auto-discover agents
-  python3 irc_adapter.py --agents Atlas,Scout       # specific agents
-  python3 irc_adapter.py --nick-prefix "MyBot-"    # nicks: MyBot-Atlas, MyBot-Scout
+  python3 irc_adapter.py
+  python3 irc_adapter.py --agents Sr,Jr,Trip
 """
 
 import asyncio
@@ -44,35 +49,25 @@ ADAPTER_NAME = "irc"
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
 
-def _build_agent_nicks(agents, nick_prefix=""):
-    """Build agent nick map from running_agents.json or --agents flag.
-    Nick format: {prefix}{AgentName} (e.g., 'MyBot-Atlas' with prefix 'MyBot-')
-    If no prefix, nicks are just the agent name."""
-    return {name: f"{nick_prefix}{name}" for name in agents}
+AGENT_NICKS = {
+    "Sr": "Sr",
+    "Jr": "Jr",
+    "Trip": "trip",
+    "Q": "Q",
+    "Cinco": "Cinco",
+}
 
-def _build_thought_channels(agents):
-    """Build thought channel map: each agent gets #{name}-thoughts."""
-    return {name: f"#{name.lower()}-thoughts" for name in agents}
+# All MikeyV nicks (for loop suppression)
+MIKEYV_NICKS = {v.lower() for v in AGENT_NICKS.values()}
 
-def _discover_agents():
-    """Discover agents from running_agents.json."""
-    try:
-        import json
-        ra_path = os.path.expanduser("~/asdaaas/running_agents.json")
-        with open(ra_path) as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return list(data.keys())
-        elif isinstance(data, list):
-            return data
-    except Exception:
-        pass
-    return []
-
-# These are populated at startup in main() from --agents flag or running_agents.json
-AGENT_NICKS = {}
-AGENT_NICKS_SET = set()  # lowercase nicks for loop suppression
-THOUGHT_CHANNELS = {}
+# Per-agent thought channels
+THOUGHT_CHANNELS = {
+    "Sr": "#sr-thoughts",
+    "Jr": "#jr-thoughts",
+    "Trip": "#trip-thoughts",
+    "Q": "#q-thoughts",
+    "Cinco": "#cinco-thoughts",
+}
 
 # Track which channels we've joined (to avoid re-joining)
 _joined_channels = set()
@@ -545,8 +540,8 @@ async def run_adapter(agents, channel, host, port):
                             if cmd["type"] == "nick":
                                 old_nick = conn.nick
                                 await conn.change_nick(cmd["args"])
-                                AGENT_NICKS_SET.discard(old_nick.lower())
-                                AGENT_NICKS_SET.add(cmd["args"].lower())
+                                MIKEYV_NICKS.discard(old_nick.lower())
+                                MIKEYV_NICKS.add(cmd["args"].lower())
                             elif cmd["type"] == "msg":
                                 await conn.send(cmd["text"], target=cmd["target"])
                                 tprint(f"[irc-adapter] {agent_name} PM -> {cmd['target']} ({len(cmd['text'])} chars)")
@@ -608,34 +603,18 @@ async def run_adapter(agents, channel, host, port):
 
 
 def main():
-    global AGENT_NICKS, AGENT_NICKS_SET, THOUGHT_CHANNELS
-
-    parser = argparse.ArgumentParser(description="Agentabide IRC Adapter")
+    parser = argparse.ArgumentParser(description="MikeyV IRC Adapter")
     parser.add_argument("--channel", default=DEFAULT_CHANNEL)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--agents", default=None, help="Comma-separated agent names (default: auto-discover from running_agents.json)")
-    parser.add_argument("--nick-prefix", default="", help="Prefix for IRC nicks (e.g., 'MyBot-' gives 'MyBot-Atlas')")
+    parser.add_argument("--agents", default=None, help="Comma-separated subset (default: all)")
     args = parser.parse_args()
 
-    # Discover agents
     if args.agents:
-        agent_names = [a.strip() for a in args.agents.split(",")]
+        names = [a.strip() for a in args.agents.split(",")]
+        agents = {a: AGENT_NICKS[a] for a in names if a in AGENT_NICKS}
     else:
-        agent_names = _discover_agents()
-        if not agent_names:
-            print("[irc-adapter] No agents found. Use --agents or populate ~/asdaaas/running_agents.json")
-            sys.exit(1)
-
-    # Build nick and channel maps
-    AGENT_NICKS = _build_agent_nicks(agent_names, args.nick_prefix)
-    AGENT_NICKS_SET = {v.lower() for v in AGENT_NICKS.values()}
-    THOUGHT_CHANNELS = _build_thought_channels(agent_names)
-
-    print(f"[irc-adapter] Agents: {list(AGENT_NICKS.keys())}")
-    print(f"[irc-adapter] Nicks: {list(AGENT_NICKS.values())}")
-
-    agents = dict(AGENT_NICKS)
+        agents = dict(AGENT_NICKS)
 
     try:
         asyncio.run(run_adapter(agents, args.channel, args.host, args.port))

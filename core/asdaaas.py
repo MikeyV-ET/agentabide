@@ -30,11 +30,15 @@ import asyncio
 import json
 import os
 import secrets
+import signal
 import sys
 import time
 import argparse
 import tempfile
 from pathlib import Path
+
+# Graceful shutdown flag — set by SIGTERM/SIGINT or "shutdown" command
+_shutdown_requested = False
 
 ASDAAAS_DIR = Path(os.path.expanduser("~/asdaaas"))
 ADAPTERS_DIR = ASDAAAS_DIR / "adapters"
@@ -191,17 +195,18 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
 COMPACTION_THRESHOLD = 0.85  # auto-compaction fires at 85% of context_window
 COMPACTION_COOLDOWN_TURNS = 2  # turns after compaction before manual compact is available
 
-def context_left_tag(total_tokens, context_window, turns_since_compaction=None):
+def context_left_tag(total_tokens, context_window, turns_since_compaction=None, gaze=None):
     """Format a compact context-remaining tag for prompt injection.
     
     Reports tokens remaining before compaction (85% of context_window),
     not before the theoretical maximum. This is the real usable budget.
     
-    Includes compaction status:
-      [Context left 89k | just compacted]          -- turn 0
-      [Context left 85k | compacted 1 turn ago]    -- turn 1
-      [Context left 80k | compaction available]    -- turn 2+
-      [Context left 80k]                            -- turns_since_compaction is None
+    Includes compaction status and gaze:
+      [Context left 89k | just compacted | irc/pm:eric]
+      [Context left 85k | compacted 1 turn ago | irc/#standup]
+      [Context left 80k | compaction available | slack/#general]
+      [Context left 80k | irc/pm:eric]              -- no compaction info
+      [Context left 80k]                            -- no compaction, no gaze
     
     Returns empty string if context_window is 0 or total_tokens is 0.
     """
@@ -217,14 +222,20 @@ def context_left_tag(total_tokens, context_window, turns_since_compaction=None):
     else:
         left_str = f"{k:.1f}k"
     
+    parts = [f"Context left {left_str}"]
+    
     if turns_since_compaction is not None:
         if turns_since_compaction == 0:
-            return f"\n[Context left {left_str} | just compacted]"
+            parts.append("just compacted")
         elif turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
-            return f"\n[Context left {left_str} | compacted {turns_since_compaction} turn ago]"
+            parts.append(f"compacted {turns_since_compaction} turn ago")
         else:
-            return f"\n[Context left {left_str} | compaction available]"
-    return f"\n[Context left {left_str}]"
+            parts.append("compaction available")
+    
+    if gaze is not None:
+        parts.append(gaze_label(gaze))
+    
+    return "\n[" + " | ".join(parts) + "]"
 
 
 # ============================================================================
@@ -262,6 +273,19 @@ def read_gaze(agent_name):
 #
 # asdaaas does NOT interpret room values. It just compares strings.
 # ============================================================================
+
+def gaze_label(gaze):
+    """Format gaze speech target as compact label for prompt injection.
+    
+    Returns e.g. "irc/pm:eric", "irc/#standup", "slack/#general", or "none".
+    """
+    adapter, room = get_room(gaze)
+    if adapter is None:
+        return "none"
+    if room is None:
+        return adapter
+    return f"{adapter}/{room}"
+
 
 def get_room(gaze):
     """Extract the room from a gaze's speech target. Returns (adapter, room) tuple."""
@@ -492,7 +516,9 @@ def read_awareness(agent_name):
 
 def poll_adapter_inboxes(agent_name, awareness):
     """Poll all adapter inboxes that the agent is aware of.
-    Returns list of messages from all watched adapters."""
+    Returns list of messages from all watched adapters.
+    DESTRUCTIVE: deletes inbox files after reading. Use has_pending_adapter_messages()
+    for non-destructive checks (e.g. during delay interruption)."""
     messages = []
     
     # Poll direct adapter inboxes (agent-centric: ~/agents/<name>/asdaaas/adapters/<adapter>/inbox/)
@@ -515,6 +541,20 @@ def poll_adapter_inboxes(agent_name, awareness):
     # This is for future use if needed
     
     return messages
+
+
+def has_pending_adapter_messages(agent_name, awareness):
+    """Non-destructive check: are there any messages in adapter inboxes?
+    Used during delay interruption checks where we need to detect new
+    messages without consuming them. The actual poll_adapter_inboxes()
+    call happens in the main loop after the delay breaks."""
+    for adapter in awareness.get("direct_attach", []):
+        inbox = agent_dir(agent_name) / "adapters" / adapter / "inbox"
+        if not inbox.exists():
+            continue
+        if any(inbox.glob("*.json")):
+            return True
+    return False
 
 
 def write_to_outbox(agent_name, content, gaze_target, content_type="speech"):
@@ -549,6 +589,62 @@ def write_to_outbox(agent_name, content, gaze_target, content_type="speech"):
         except OSError:
             pass
         raise
+
+
+# ============================================================================
+# STREAMING THOUGHTS -- real-time intermediate speech routing
+# ============================================================================
+
+class StreamingThoughts:
+    """Accumulates speech chunks and flushes to thoughts outbox on boundaries.
+    
+    During a tool-heavy turn, the agent emits speech between tool calls:
+    "Let me check the tests..." [tool_call: run_terminal_cmd] "23/23 passing..."
+    
+    This class captures those intermediate chunks and writes them to the
+    thoughts gaze target when a tool_call boundary is hit, giving observers
+    a real-time view of what the agent is doing.
+    
+    The final speech still goes through the normal gaze speech routing.
+    Streaming thoughts are a parallel channel for live observation.
+    
+    Usage:
+        st = StreamingThoughts(agent_name, gaze)
+        speech, thoughts, meta = await collect_response(
+            stdout, prompt_id,
+            on_speech_chunk=st.on_chunk,
+            on_tool_call=st.on_tool_call)
+        st.flush()  # flush any remaining chunks after response completes
+    """
+    
+    def __init__(self, agent_name, gaze):
+        self.agent_name = agent_name
+        self.thoughts_target = gaze.get("thoughts")
+        self._buffer = []
+        self._chunk_count = 0
+    
+    def on_chunk(self, text):
+        """Called on each agent_message_chunk."""
+        self._buffer.append(text)
+        self._chunk_count += 1
+    
+    def on_tool_call(self, title):
+        """Called when a tool_call frame arrives -- flush accumulated speech."""
+        self.flush(f" [{title}]")
+    
+    def flush(self, suffix=""):
+        """Write accumulated chunks to thoughts outbox and clear buffer."""
+        if not self._buffer or not self.thoughts_target:
+            self._buffer.clear()
+            return
+        text = "".join(self._buffer).strip()
+        if text:
+            write_to_outbox(self.agent_name, text + suffix, self.thoughts_target, "thoughts")
+        self._buffer.clear()
+    
+    @property
+    def chunk_count(self):
+        return self._chunk_count
 
 
 # ============================================================================
@@ -703,21 +799,79 @@ def format_doorbell(bell):
 # ============================================================================
 
 def poll_commands(agent_name):
-    """Poll command directory for commands from adapters that need pipe access.
-    E.g., session adapter sends {"action": "compact"}."""
+    """Poll command queue for commands from adapters or the agent itself.
+    E.g., session adapter sends {"action": "compact"}, agent sends {"action": "delay"}.
+    
+    Reads from two sources (in order):
+    1. Legacy commands.json (single file, backward compat)
+    2. commands/ directory (queue, sorted by filename = chronological)
+    
+    DESTRUCTIVE: deletes command files after reading. Use has_pending_commands()
+    for non-destructive checks (e.g. during delay interruption).
+    
+    Returns a list of command dicts (may be empty). Previously returned a single
+    dict or None; callers should iterate over the list.
+    """
     a_dir = agent_dir(agent_name)
     a_dir.mkdir(parents=True, exist_ok=True)
+    commands = []
+
+    # 1. Legacy single-file (backward compat + migration)
     cmd_file = a_dir / "commands.json"
-    if not cmd_file.exists():
-        return None
-    try:
-        with open(cmd_file) as f:
-            cmd = json.load(f)
-        os.unlink(cmd_file)
-        return cmd
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[asdaaas] command read error: {e}")
-        return None
+    if cmd_file.exists():
+        try:
+            with open(cmd_file) as f:
+                cmd = json.load(f)
+            os.unlink(cmd_file)
+            commands.append(cmd)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[asdaaas] command read error (legacy): {e}")
+
+    # 2. Queue directory
+    cmd_dir = a_dir / "commands"
+    if cmd_dir.is_dir():
+        files = sorted(cmd_dir.glob("*.json"))
+        for fp in files:
+            try:
+                with open(fp) as f:
+                    cmd = json.load(f)
+                os.unlink(fp)
+                commands.append(cmd)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[asdaaas] command read error ({fp.name}): {e}")
+
+    return commands
+
+
+def has_pending_commands(agent_name):
+    """Non-destructive check: are there any commands waiting?
+    Used during delay interruption checks.
+    Checks both legacy commands.json and commands/ directory."""
+    a_dir = agent_dir(agent_name)
+    if (a_dir / "commands.json").exists():
+        return True
+    cmd_dir = a_dir / "commands"
+    if cmd_dir.is_dir() and any(cmd_dir.glob("*.json")):
+        return True
+    return False
+
+
+def write_command(agent_name, command):
+    """Write a command to the agent's command queue.
+    
+    Creates a timestamped file in commands/ directory.
+    This is the preferred way to issue commands — avoids the single-slot
+    race condition of writing directly to commands.json.
+    """
+    a_dir = agent_dir(agent_name)
+    cmd_dir = a_dir / "commands"
+    cmd_dir.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time() * 1000)
+    rand = secrets.token_hex(4)
+    fp = cmd_dir / f"cmd_{ts}_{rand}.json"
+    with open(fp, "w") as f:
+        json.dump(command, f)
+    return fp
 
 
 # ============================================================================
@@ -915,7 +1069,9 @@ async def wait_for_response(stdout, expected_id, timeout=60.0):
     raise TimeoutError(f"No response for id={expected_id} within {timeout}s")
 
 
-async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta=None):
+async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta=None,
+                           keepalive_timeout=30.0, max_wall_clock=600.0,
+                           on_speech_chunk=None, on_tool_call=None):
     """Collect agent response. Returns (speech_text, thought_text, result_meta).
     
     speech_text: concatenated agent_message_chunk text
@@ -923,19 +1079,42 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
     result_meta: dict with totalTokens, modelId, stopReason from _meta
     on_meta: optional callback(total_tokens) called when streaming _meta arrives,
              enabling real-time health file updates during long responses
+    on_speech_chunk: optional callback(text) called on each agent_message_chunk,
+             enabling real-time streaming of intermediate speech (between tool calls)
+             to a thoughts channel or observer.
+    on_tool_call: optional callback(title) called when a tool_call frame arrives,
+             enabling the caller to flush/route accumulated speech before the tool runs.
+    keepalive_timeout: seconds of silence (no frames) before timing out (default 30s).
+             As long as frames keep arriving, we keep reading. This prevents
+             tool-heavy turns from being cut off at a fixed wall clock.
+    max_wall_clock: absolute maximum seconds to wait (safety net, default 600s).
+    
+    The 'timeout' parameter is kept for backward compatibility with tests but
+    is now used as the keepalive_timeout when keepalive_timeout is not explicitly set.
     """
     speech_chunks = []
     thought_chunks = []
     result_meta = {}
     first_chunk_marked = False
     saw_prompt_complete = False
-    deadline = time.monotonic() + timeout
+    now = time.monotonic()
+    last_frame_time = now
+    wall_deadline = now + max_wall_clock
 
-    while time.monotonic() < deadline:
+    while True:
+        # Two exit conditions: (1) no frame for keepalive_timeout, (2) max wall clock
+        time_since_last_frame = time.monotonic() - last_frame_time
+        remaining_keepalive = keepalive_timeout - time_since_last_frame
+        remaining_wall = wall_deadline - time.monotonic()
+        wait_timeout = max(0.1, min(remaining_keepalive, remaining_wall))
+
+        if remaining_keepalive <= 0 or remaining_wall <= 0:
+            break
+
         try:
             frame = await asyncio.wait_for(
                 read_frame(stdout),
-                timeout=max(0.1, deadline - time.monotonic())
+                timeout=wait_timeout
             )
         except asyncio.TimeoutError:
             break
@@ -945,6 +1124,9 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
                 # didn't arrive. Not fatal — we have the speech already.
                 break
             raise RuntimeError("stdio process closed stdout")
+
+        # Frame received — reset keepalive timer
+        last_frame_time = time.monotonic()
 
         method = frame.get("method", "")
         params = frame.get("params", {})
@@ -964,6 +1146,8 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
                     timer.mark("first_chunk")
                     first_chunk_marked = True
                 speech_chunks.append(text)
+                if on_speech_chunk:
+                    on_speech_chunk(text)
 
         # Agent thought chunk
         elif method == "session/update" and update.get("sessionUpdate") == "agent_thought_chunk":
@@ -974,6 +1158,11 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
                     timer.mark("first_chunk")
                     first_chunk_marked = True
                 thought_chunks.append(text)
+
+        # Tool call — notify caller so it can flush accumulated speech
+        elif method == "session/update" and update.get("sessionUpdate") == "tool_call":
+            if on_tool_call:
+                on_tool_call(update.get("title", ""))
 
         # Extract metadata (totalTokens, modelId, etc.)
         # _meta is present on EVERY session/update frame (in params._meta)
@@ -1002,9 +1191,10 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
         if frame.get("id") == prompt_id:
             break
         if method == "_x.ai/session/prompt_complete":
-            # Response frame with _meta follows shortly — give it 2s
+            # Response frame with _meta follows shortly — tighten keepalive to 2s
             saw_prompt_complete = True
-            deadline = min(deadline, time.monotonic() + 2.0)
+            keepalive_timeout = min(keepalive_timeout, 2.0)
+            last_frame_time = time.monotonic()  # reset so the 2s starts now
 
     return "".join(speech_chunks), "".join(thought_chunks), result_meta
 
@@ -1092,10 +1282,36 @@ async def drain_stale_frames(stdout, agent_name=None):
 
 
 # ============================================================================
+# GRACEFUL SHUTDOWN
+# ============================================================================
+
+def _request_shutdown(sig, agent_name):
+    """Signal handler: set shutdown flag. Current turn finishes, then exit."""
+    global _shutdown_requested
+    sig_name = signal.Signals(sig).name
+    print(f"\n[asdaaas] {sig_name} received for {agent_name} -- finishing current turn, then shutting down")
+    _shutdown_requested = True
+
+
+def request_shutdown_from_command(agent_name):
+    """Command handler: same as signal, but triggered by commands.json."""
+    global _shutdown_requested
+    print(f"[asdaaas] Shutdown command received for {agent_name} -- finishing current turn, then shutting down")
+    _shutdown_requested = True
+
+
+# ============================================================================
 # MAIN LOOP
 # ============================================================================
 
 async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
+    global _shutdown_requested
+
+    # Register signal handlers for graceful shutdown
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_shutdown, sig, agent_name)
+
     # Create per-agent directory structure (agent-centric: ~/agents/<name>/asdaaas/...)
     a_dir = agent_dir(agent_name)
     a_dir.mkdir(parents=True, exist_ok=True)
@@ -1208,6 +1424,12 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
     # ---- Main loop ----
     while True:
         try:
+            # ---- Graceful shutdown check ----
+            if _shutdown_requested:
+                print(f"[asdaaas] Shutting down {agent_name} gracefully")
+                write_health(agent_name, "shutdown", "graceful shutdown", total_tokens, context_window)
+                break
+
             # ---- 0. Detect auto-compaction (token count dropped significantly) ----
             if total_tokens < _prev_tokens * 0.6 and _prev_tokens > 0:
                 print(f"[asdaaas] Auto-compaction detected: {_prev_tokens} -> {total_tokens}")
@@ -1229,7 +1451,10 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         "sessionId": sid,
                         "prompt": [{"type": "text", "text": "/compact"}],
                     }))
-                    _, _, meta = await collect_response(stdout, _rpc_id, timeout=300)
+                    # Compaction can be silent for 60-120s while the binary summarizes.
+                    # Use long keepalive so we don't bail during the silence.
+                    _, _, meta = await collect_response(stdout, _rpc_id, timeout=300,
+                                                        keepalive_timeout=180.0, max_wall_clock=300.0)
                     if meta.get("totalTokens"):
                         total_tokens = meta["totalTokens"]
 
@@ -1247,7 +1472,11 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         "sessionId": sid,
                         "prompt": [{"type": "text", "text": probe_text}],
                     }))
-                    probe_speech, _, probe_meta = await collect_response(stdout, _rpc_id, timeout=120, on_meta=_on_streaming_meta)
+                    # Post-compaction probe: agent may read notebooks, do tool calls.
+                    # Use generous keepalive but normal max wall clock.
+                    probe_speech, _, probe_meta = await collect_response(stdout, _rpc_id, timeout=120,
+                                                                         keepalive_timeout=60.0, max_wall_clock=300.0,
+                                                                         on_meta=_on_streaming_meta)
                     if probe_meta.get("totalTokens"):
                         total_tokens = probe_meta["totalTokens"]
                         print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
@@ -1278,11 +1507,20 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                     compact_pending = None
 
             # ---- 1a. Check for adapter commands (e.g., /compact) ----
-            cmd = poll_commands(agent_name)
-            if cmd:
+            commands = poll_commands(agent_name)
+            for cmd in commands:
                 action = cmd.get("action", "")
                 request_id = cmd.get("request_id", "")
                 print(f"[asdaaas] Command: {action} (req={request_id})")
+
+                # ---- Piggyback ack: any command can carry an "ack" field ----
+                # Solves the single-slot race: agent writes one command file
+                # with both the action and ack ids, both processed atomically.
+                # E.g.: {"action": "delay", "seconds": 300, "ack": ["bell_001"]}
+                piggyback_ack = cmd.get("ack", [])
+                if piggyback_ack:
+                    removed = ack_doorbells(agent_name, piggyback_ack)
+                    print(f"[asdaaas] Piggyback ack: {removed} doorbell(s) cleared")
 
                 if action == "delay":
                     delay_val = cmd.get("seconds", 0)
@@ -1344,6 +1582,11 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                             json.dump(bell, f)
                         os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
 
+                elif action == "shutdown":
+                    request_shutdown_from_command(agent_name)
+                    # Flag is set; loop will break at top of next iteration
+                    # (current turn is already between turns, so exit is immediate)
+
             # ---- 1b. Check watchdog timeouts (Phase 4.4) ----
             watchdog.deliver_timeout_doorbells(agent_name)
 
@@ -1351,8 +1594,9 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
             adapters = read_adapter_registrations()
 
             # ---- 2. Deliver doorbells to agent ----
-            # Re-read awareness early so TTL is available for doorbell expiry
+            # Re-read awareness and gaze early so they're fresh for all sections
             awareness = read_awareness(agent_name)
+            gaze = read_gaze(agent_name)
             did_work_this_iteration = False
             bells = poll_doorbells(agent_name, awareness)
             if bells:
@@ -1366,7 +1610,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                 # Batch all doorbells into a single prompt.
                 # Agent sees the full picture and can ack/ignore/act on each.
                 bell_lines = [format_doorbell(bell) for bell in bells]
-                batch_text = "\n".join(bell_lines) + context_left_tag(total_tokens, context_window, turns_since_compaction)
+                batch_text = "\n".join(bell_lines) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                 print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
                 await drain_stale_frames(stdout, agent_name)
                 await send(stdin, rpc_request("session/prompt", {
@@ -1382,14 +1626,11 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                 if speech.strip():
                     gaze = read_gaze(agent_name)
                     write_to_outbox(agent_name, speech.strip(), gaze.get("speech"), "speech")
-                    if thoughts.strip() and gaze.get("thoughts"):
+                    if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
                         write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
                     write_health(agent_name, "active", f"doorbell response ({len(bells)} bells)", total_tokens, context_window)
 
             # ---- 3. Poll per-adapter inboxes + legacy inbox ----
-            # Re-read awareness and gaze periodically (agent can change them)
-            awareness = read_awareness(agent_name)
-            gaze = read_gaze(agent_name)
             
             # ---- Attention structure: check timeouts ----
             attentions = poll_attentions(agent_name)
@@ -1416,7 +1657,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
             # Prepend pending messages so they're delivered first (oldest first)
             messages = pending_msgs + messages
 
-            if not messages and not bells and not cmd:
+            if not messages and not bells and not commands:
                 # No external work this iteration. Check default doorbell.
                 awareness = read_awareness(agent_name)
                 default_doorbell_enabled = awareness.get("default_doorbell", False)
@@ -1432,15 +1673,18 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                             delay_remaining -= 0.25
                             # Check for external events during delay
                             # Use has_pending_doorbells (not poll) to avoid incrementing delivered_count
+                            if _shutdown_requested:
+                                print(f"[asdaaas] Delay interrupted by shutdown")
+                                break
                             ext_bells = has_pending_doorbells(agent_name)
-                            ext_msgs = poll_adapter_inboxes(agent_name, awareness)
-                            ext_cmd = poll_commands(agent_name)
+                            ext_msgs = has_pending_adapter_messages(agent_name, awareness)
+                            ext_cmd = has_pending_commands(agent_name)
                             if ext_bells or ext_msgs or ext_cmd:
                                 # External event arrived -- break delay, deliver it
                                 print(f"[asdaaas] Delay interrupted by external event")
-                                # Doorbells persist on disk (no re-queue needed).
-                                # Messages need re-queue since poll_adapter_inboxes deletes.
-                                # They'll be picked up on the next iteration.
+                                # All three checks are NON-DESTRUCTIVE (file existence only).
+                                # The actual destructive reads (poll_adapter_inboxes,
+                                # poll_commands) happen in the main loop after break.
                                 break
                         next_turn_delay = 0  # reset for next iteration
 
@@ -1518,7 +1762,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         continue
                     
                     else:  # doorbell
-                        bell_text = format_background_doorbell(msg) + context_left_tag(total_tokens, context_window, turns_since_compaction)
+                        bell_text = format_background_doorbell(msg) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                         print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
                         await drain_stale_frames(stdout, agent_name)
                         await send(stdin, rpc_request("session/prompt", {
@@ -1532,7 +1776,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         # Route background doorbell response through gaze
                         if speech.strip():
                             write_to_outbox(agent_name, speech.strip(), gaze.get("speech"), "speech")
-                            if thoughts.strip() and gaze.get("thoughts"):
+                            if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
                                 write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
                             write_health(agent_name, "active", f"background doorbell response", total_tokens, context_window)
                         continue
@@ -1540,7 +1784,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                 # ---- Message is in the room -- pipe it through ----
                 timer = MessageTimer(agent_name, msg_id)
 
-                prompt_text = f"<{sender} (via {adapter})> {text}" + context_left_tag(total_tokens, context_window, turns_since_compaction)
+                prompt_text = f"<{sender} (via {adapter})> {text}" + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                 print(f"[asdaaas] IN: {prompt_text[:120]}")
 
                 # Drain any stale frames before sending new prompt.
@@ -1554,14 +1798,26 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                     "prompt": [{"type": "text", "text": prompt_text}],
                 }))
 
-                speech, thoughts, meta = await collect_response(stdout, _rpc_id, timer=timer, timeout=120, on_meta=_on_streaming_meta)
+                # Stream intermediate speech to thoughts channel in real-time
+                gaze = read_gaze(agent_name)
+                st = StreamingThoughts(agent_name, gaze)
+
+                speech, thoughts, meta = await collect_response(
+                    stdout, _rpc_id, timer=timer, timeout=120,
+                    on_meta=_on_streaming_meta,
+                    on_speech_chunk=st.on_chunk,
+                    on_tool_call=st.on_tool_call)
+                # Don't flush remaining buffer -- text after the last tool call
+                # is the final speech, not intermediate thinking. Only text
+                # flushed at tool_call boundaries is thoughts.
+                # st.flush() would duplicate final speech to thoughts channel.
                 timer.mark("prompt_complete")
 
                 if meta.get("totalTokens"):
                     total_tokens = meta["totalTokens"]
                 turns_since_compaction += 1
 
-                # Re-read gaze — agent may have changed it via tool call during response
+                # Re-read gaze -- agent may have changed it via tool call during response
                 gaze = read_gaze(agent_name)
 
                 # Route speech and thoughts through gaze (the room the agent is in)
@@ -1569,7 +1825,9 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                     write_to_outbox(agent_name, speech.strip(), gaze.get("speech"), "speech")
                     timer.mark("outbox_done")
 
-                    if thoughts.strip() and gaze.get("thoughts"):
+                    # Route model thoughts (agent_thought_chunk) if distinct from speech.
+                    # Some models echo speech as thoughts — skip if identical.
+                    if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
                         write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
 
                     print(timer.log_line())
@@ -1594,8 +1852,34 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                 break
             await asyncio.sleep(2.0)
 
+    # ---- Cleanup ----
+    print(f"[asdaaas] Stopping grok subprocess for {agent_name}...")
     proc.terminate()
-    await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+        print(f"[asdaaas] {agent_name} subprocess exited cleanly")
+    except asyncio.TimeoutError:
+        print(f"[asdaaas] {agent_name} subprocess did not exit in 10s, killing")
+        proc.kill()
+        await proc.wait()
+    # Unregister from running_agents.json
+    _unregister_running_agent(agent_name)
+    print(f"[asdaaas] {agent_name} shut down.")
+
+
+def _unregister_running_agent(agent_name):
+    """Remove agent from running_agents.json on shutdown."""
+    reg_path = ASDAAAS_DIR / "running_agents.json"
+    try:
+        with open(reg_path) as f:
+            reg = json.load(f)
+        if agent_name in reg:
+            del reg[agent_name]
+            with open(reg_path, "w") as f:
+                json.dump(reg, f, indent=2)
+            print(f"[asdaaas] Unregistered {agent_name} from running_agents.json")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
 
 
 if __name__ == "__main__":
