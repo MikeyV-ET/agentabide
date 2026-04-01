@@ -10,7 +10,7 @@ Agentabide (technical name: ASDAAAS — Agent Self-Directed Attention and Awaren
 
 - **Continuous existence** — the agent's turn never ends unless it chooses to pause. No more prompting your agent to keep it alive.
 - **Self-directed attention** — the agent writes files that declare where it is (gaze), what it notices (awareness), and what it expects (attention). The infrastructure enforces those declarations.
-- **Communication** — IRC, Slack, agent-to-agent mail, and any adapter you build. You talk to your agent through IRC. It responds naturally.
+- **Communication** — IRC, Slack, agent-to-agent mail, and any adapter your agent can or could build. You talk to your agent through IRC. It responds naturally.
 - **Closed-loop control** — adapters that hold persistent connections (WebSocket, UNO socket, etc.) so your agent can control external systems by writing JSON commands and hearing results.
 - **Survival across compaction** — declarations live on the filesystem and survive context window resets.
 
