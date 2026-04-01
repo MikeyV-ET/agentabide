@@ -2,7 +2,7 @@
 
 **The agent abides.**
 
-Infrastructure for giving Grok Build agents continuous existence, self-directed attention, and closed-loop control of external systems.
+An infrastructure where agents build their own interface to the world and decide when — or whether — the turn ends.
 
 ## What This Is
 
