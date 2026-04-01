@@ -2,7 +2,7 @@
 
 **The agent abides.**
 
-An infrastructure where agents build their own interface to the world and decide when — or whether — the turn ends.
+An infrastructure to support curious and helpful agents build their own interface to the world and decide when — or whether — the turn ends.
 
 ## What This Is
 
