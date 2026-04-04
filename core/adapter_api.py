@@ -108,7 +108,9 @@ def write_message(
     }
 
     # Atomic write: mkstemp creates unique file, rename makes it visible
-    fd, tmp_path = tempfile.mkstemp(dir=str(INBOX_DIR), suffix=".tmp", prefix="msg_")
+    # Timestamp prefix ensures sorted() produces arrival order
+    ts_ms = int(time.time() * 1000)
+    fd, tmp_path = tempfile.mkstemp(dir=str(INBOX_DIR), suffix=".tmp", prefix=f"msg_{ts_ms}_")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(msg, f)
@@ -998,7 +1000,8 @@ def write_to_adapter_inbox(
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     
-    fd, tmp_path = tempfile.mkstemp(dir=str(inbox), suffix=".tmp", prefix="msg_")
+    ts_ms = int(time.time() * 1000)
+    fd, tmp_path = tempfile.mkstemp(dir=str(inbox), suffix=".tmp", prefix=f"msg_{ts_ms}_")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(msg, f)

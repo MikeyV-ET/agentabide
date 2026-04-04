@@ -807,6 +807,7 @@ One instance per agent. **Must be launched detached** (setsid nohup) to avoid po
 - Session replay: can exceed 64KB readline buffer, use 16MB limit
 - CWD: must match session creation path (URL-encoded in ~/.grok/sessions/)
 - session/load: does NOT return sessionId -- use the one you sent
+- **Cancel mid-stream:** Send `{"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": <prompt_id>, "reason": "cancelled"}}` to interrupt an in-flight prompt. Result arrives with `stopReason: "cancelled"`. The partial response remains in session history. See STDIO_PROTOCOL.md for full details.
 
 ### Health heartbeat
 Writes to `~/agents/<agent>/asdaaas/health.json` with status (ready/active/error), PID, timestamp, `totalTokens`, and `contextWindow`. The token data is extracted from the result `_meta` after each prompt completion. This is the data source for the context introspection adapter.

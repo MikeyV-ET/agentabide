@@ -156,13 +156,29 @@ def ring_doorbell(agent_name: str, msg: dict):
     priority = msg.get("priority", 3)
     msg_id = msg.get("id", "")
     
-    # Inline the full message in the doorbell (short messages)
-    # For long messages, truncate and point to file
+    # For long messages, write a payload file and reference it in the doorbell.
+    # The agent can read the full message from the payload path.
+    # (Bug fix: previously truncated to 500 chars and said "full message in inbox",
+    # but the inbox file was deleted. Agent got truncated text with no recovery path.
+    # Trip hit this 3x in Session 42.)
     if len(text) > 500:
+        payload_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / "localmail" / "payloads"
+        payload_dir.mkdir(parents=True, exist_ok=True)
+        payload_path = payload_dir / f"{msg_id}.json"
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(payload_dir), suffix=".tmp", prefix="pay_")
+            with os.fdopen(fd, "w") as f:
+                json.dump(msg, f, indent=2)
+            os.rename(tmp, str(payload_path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except (OSError, UnboundLocalError):
+                pass
         preview = text[:500] + "..."
-        bell_text = f"Mail from {sender}: {preview}\n(Full message in localmail inbox)"
+        bell_text = f"[localmail] Mail from {sender}:\n{preview}\n(Full message: cat {payload_path})"
     else:
-        bell_text = f"Mail from {sender}: {text}"
+        bell_text = f"[localmail] Mail from {sender}:\n{text}"
     
     bell = {
         "adapter": "localmail",
@@ -215,7 +231,7 @@ def get_asdaaas_agents():
                 health = json.load(f)
             agent = health.get("agent", "")
             status = health.get("status", "")
-            if agent and status in ("ready", "active"):
+            if agent and status in ("ready", "active", "working"):
                 asdaaas_agents.add(agent)
         except (json.JSONDecodeError, OSError):
             pass
@@ -277,7 +293,6 @@ def watch_loop(agents: list, poll_interval: float = 1.0):
                     if agent in asdaaas_agents:
                         # Agent is on asdaaas — ring doorbell with inline content
                         ring_doorbell(agent, msg)
-                        # Delete the inbox file (content is in the doorbell)
                         try:
                             entry.unlink()
                         except OSError:

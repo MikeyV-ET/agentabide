@@ -557,6 +557,50 @@ def has_pending_adapter_messages(agent_name, awareness):
     return False
 
 
+async def run_delay_loop(agent_name, delay_seconds, awareness, poll_interval=0.25):
+    """Run the delay loop, checking for external events every poll_interval seconds.
+    
+    Returns:
+        (interrupted: bool, reason: str)
+        - interrupted=True, reason="external_event" if an external event broke the delay
+        - interrupted=True, reason="shutdown" if shutdown was requested
+        - interrupted=False, reason="expired" if the delay expired naturally
+    """
+    delay_remaining = delay_seconds
+    while delay_remaining > 0:
+        await asyncio.sleep(min(poll_interval, delay_remaining))
+        delay_remaining -= poll_interval
+        if _shutdown_requested:
+            return True, "shutdown"
+        if (has_pending_doorbells(agent_name)
+                or has_pending_adapter_messages(agent_name, awareness)
+                or has_pending_commands(agent_name)):
+            return True, "external_event"
+    return False, "expired"
+
+
+def queue_continue_doorbell(agent_name):
+    """Queue a [continue] doorbell for the agent, unless one already exists.
+    
+    Returns True if a doorbell was queued, False if one already existed."""
+    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    if any(f.name.startswith("cont_") for f in bell_dir.glob("*.json")):
+        return False
+    bell = {
+        "adapter": "continue",
+        "priority": 10,
+        "text": "Your turn ended. You may continue, delay, or stand by.",
+        "source": "continue",
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix="cont_")
+    with os.fdopen(fd, "w") as f:
+        json.dump(bell, f)
+    os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+    return True
+
+
 def write_to_outbox(agent_name, content, gaze_target, content_type="speech"):
     """Write a message to an adapter's per-agent outbox."""
     if gaze_target is None:
@@ -761,6 +805,32 @@ def ack_doorbells(agent_name, handled_ids):
         except (json.JSONDecodeError, OSError) as e:
             print(f"[asdaaas] doorbell ack error: {e}")
     return removed
+
+
+def _cleanup_compact_doorbells(agent_name):
+    """Remove all compact_confirm doorbells from disk.
+    
+    Called after compaction succeeds or the confirmation request expires.
+    Without this cleanup, persistent doorbells re-deliver the stale
+    compact_confirm prompt to the agent, which interprets it as a new
+    request and writes a new compact command -- creating an infinite loop.
+    (Bug observed: Q went through 8 cycles of this in Session 40.)
+    """
+    bell_dir = agent_dir(agent_name) / "doorbells"
+    if not bell_dir.exists():
+        return
+    removed = 0
+    for f in bell_dir.glob("*.json"):
+        try:
+            with open(f) as fh:
+                bell = json.load(fh)
+            if bell.get("command") == "compact_confirm":
+                os.unlink(f)
+                removed += 1
+        except (json.JSONDecodeError, OSError):
+            pass
+    if removed:
+        print(f"[asdaaas] Cleaned up {removed} compact_confirm doorbell(s)")
 
 
 def format_doorbell(bell):
@@ -1097,14 +1167,30 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
     result_meta = {}
     first_chunk_marked = False
     saw_prompt_complete = False
+    pending_tool_calls = set()  # toolCallIds of tools currently executing
     now = time.monotonic()
     last_frame_time = now
     wall_deadline = now + max_wall_clock
 
     while True:
-        # Two exit conditions: (1) no frame for keepalive_timeout, (2) max wall clock
+        # Exit conditions:
+        # 1. prompt_complete seen + keepalive fires (response frame didn't arrive)
+        # 2. max_wall_clock exceeded (absolute safety net)
+        #
+        # We do NOT exit on keepalive alone before prompt_complete. The model
+        # may be reasoning (planning, thinking) between speech chunks with no
+        # frames emitted. A keepalive gap does not mean the turn is over —
+        # only prompt_complete means that. Without this, reasoning gaps > 30s
+        # cause collect_response to exit early, losing subsequent speech.
+        # (Session 43 bug: 784 chars of speech lost to keepalive timeout.)
         time_since_last_frame = time.monotonic() - last_frame_time
-        remaining_keepalive = keepalive_timeout - time_since_last_frame
+        if saw_prompt_complete and not pending_tool_calls:
+            # Turn is ending — use tightened keepalive to catch response frame
+            effective_keepalive = keepalive_timeout
+        else:
+            # Turn in progress — only respect wall clock
+            effective_keepalive = max_wall_clock
+        remaining_keepalive = effective_keepalive - time_since_last_frame
         remaining_wall = wall_deadline - time.monotonic()
         wait_timeout = max(0.1, min(remaining_keepalive, remaining_wall))
 
@@ -1159,10 +1245,19 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
                     first_chunk_marked = True
                 thought_chunks.append(text)
 
-        # Tool call — notify caller so it can flush accumulated speech
+        # Tool call — track as pending and notify caller
         elif method == "session/update" and update.get("sessionUpdate") == "tool_call":
+            tool_id = update.get("toolCallId")
+            if tool_id:
+                pending_tool_calls.add(tool_id)
             if on_tool_call:
                 on_tool_call(update.get("title", ""))
+
+        # Tool call update — remove from pending when completed
+        elif method == "session/update" and update.get("sessionUpdate") == "tool_call_update":
+            tool_id = update.get("toolCallId")
+            if tool_id and update.get("status") == "completed":
+                pending_tool_calls.discard(tool_id)
 
         # Extract metadata (totalTokens, modelId, etc.)
         # _meta is present on EVERY session/update frame (in params._meta)
@@ -1192,8 +1287,11 @@ async def collect_response(stdout, prompt_id, timer=None, timeout=120.0, on_meta
             break
         if method == "_x.ai/session/prompt_complete":
             # Response frame with _meta follows shortly — tighten keepalive to 2s
+            # Only tighten if no tool calls are still pending (safety net —
+            # prompt_complete should always come after all tools finish)
             saw_prompt_complete = True
-            keepalive_timeout = min(keepalive_timeout, 2.0)
+            if not pending_tool_calls:
+                keepalive_timeout = min(keepalive_timeout, 2.0)
             last_frame_time = time.monotonic()  # reset so the 2s starts now
 
     return "".join(speech_chunks), "".join(thought_chunks), result_meta
@@ -1265,18 +1363,20 @@ async def drain_stale_frames(stdout, agent_name=None):
         type_counts = dict(Counter(frame_types))
         print(f"[asdaaas] DRAIN: {drained} stale frame(s), types: {type_counts}")
         if speech:
-            print(f"[asdaaas] DRAIN: recovered {len(speech)} chars of speech")
-            # Deliver recovered speech if it looks complete enough.
-            # A response starting with /msg or / is likely a real response.
-            # A fragment starting mid-word is likely the tail of a truncated response.
-            first_word = speech.split()[0] if speech.split() else ""
-            if first_word.startswith("/") or first_word[0:1].isupper() or len(speech) > 20:
-                print(f"[asdaaas] DRAIN: delivering recovered speech: {speech[:80]}")
-                if agent_name:
-                    gaze = read_gaze(agent_name)
-                    write_to_outbox(agent_name, speech, gaze.get("speech"), "speech")
-            else:
-                print(f"[asdaaas] DRAIN: discarding fragment: {speech[:80]}")
+            # Log but DO NOT deliver. With the collect_response tool_call
+            # tracking fix (Session 43), stale frames should be rare —
+            # collect_response now extends its keepalive while tool calls are
+            # in flight, preventing premature exit during long tool executions.
+            #
+            # If we still see stale speech here, it means either:
+            # 1. A tool call exceeded max_wall_clock (600s) — extremely long
+            # 2. A protocol anomaly (extra prompt_complete, orphaned frames)
+            # 3. Post-compaction pipe desync
+            #
+            # In all cases, delivering stale speech would replay old responses
+            # to the operator (Eric's "bunch of messages" bug, Session 43).
+            # Log for diagnostics, discard for safety.
+            print(f"[asdaaas] DRAIN: discarding {len(speech)} chars of stale speech: {speech[:80]}")
     
     return drained, speech
 
@@ -1416,6 +1516,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
     # ---- Compaction state ----
     turns_since_compaction = COMPACTION_COOLDOWN_TURNS  # start as "available" (not just-compacted)
     compact_pending = None  # None or {"confirm_path": "/tmp/xxx.tmp", "request_id": "..."}
+    compact_pending_turns = 0  # how many turns the agent has had to confirm (expires after 3)
     _prev_tokens = total_tokens  # for detecting auto-compaction (token drop)
     next_turn_delay = 0  # seconds to wait before next default doorbell (0=immediate)
     delay_until_event = False  # if True, skip default doorbell entirely (wait for external)
@@ -1435,16 +1536,19 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                 print(f"[asdaaas] Auto-compaction detected: {_prev_tokens} -> {total_tokens}")
                 turns_since_compaction = 0
                 compact_pending = None  # cancel any pending manual compact
+                compact_pending_turns = 0
             _prev_tokens = total_tokens
 
-            # ---- 1. Check for compact confirmation (pending from previous turn) ----
+            # ---- 1. Check for compact confirmation (agent gets 3 turns to confirm) ----
             if compact_pending:
+                compact_pending_turns += 1
                 confirm_path = compact_pending["confirm_path"]
                 if os.path.exists(confirm_path):
                     # Agent confirmed -- execute compaction
                     os.unlink(confirm_path)
                     request_id = compact_pending.get("request_id", "")
                     compact_pending = None
+                    compact_pending_turns = 0
                     print(f"[asdaaas] Compact confirmed by {agent_name}")
                     tokens_before = total_tokens
                     await send(stdin, rpc_request("session/prompt", {
@@ -1501,10 +1605,24 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                     os.rename(tmp, str(result_file))
                     print(f"[asdaaas] Compact: {tokens_before} -> {total_tokens}")
                     write_health(agent_name, "ready", f"compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
-                else:
-                    # Confirmation file not created -- request expires
-                    print(f"[asdaaas] Compact request expired (no confirmation file)")
+                    # Clean up any lingering compact_confirm doorbells.
+                    # Without this, persistent doorbells re-deliver the stale
+                    # confirmation prompt, the agent touches a new file and
+                    # writes a new compact command, creating an infinite loop.
+                    _cleanup_compact_doorbells(agent_name)
+                elif compact_pending_turns >= 3:
+                    # Agent had 3 turns to confirm and didn't -- expire the request.
+                    # (Bug fix: previously expired after 1 turn, but at high context
+                    # the agent may need multiple turns to process the doorbell and
+                    # touch the confirmation file. Observed: Q at 168K tokens said
+                    # "noted" without tool calls, request expired, infinite retry loop.)
+                    print(f"[asdaaas] Compact request expired after {compact_pending_turns} turns (no confirmation file)")
                     compact_pending = None
+                    compact_pending_turns = 0
+                    _cleanup_compact_doorbells(agent_name)
+                else:
+                    # Still waiting for confirmation -- agent has more turns
+                    print(f"[asdaaas] Compact pending: waiting for confirmation (turn {compact_pending_turns}/3)")
 
             # ---- 1a. Check for adapter commands (e.g., /compact) ----
             commands = poll_commands(agent_name)
@@ -1565,6 +1683,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         token = secrets.token_hex(8)
                         confirm_path = f"/tmp/compact_confirm_{agent_name}_{token}.tmp"
                         compact_pending = {"confirm_path": confirm_path, "request_id": request_id}
+                        compact_pending_turns = 0
                         print(f"[asdaaas] Compact requested by {agent_name}, confirmation required: {confirm_path}")
                         bell_dir = agent_dir(agent_name) / "doorbells"
                         bell_dir.mkdir(parents=True, exist_ok=True)
@@ -1581,6 +1700,52 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         with os.fdopen(fd, "w") as f:
                             json.dump(bell, f)
                         os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+
+                elif action == "force_compact":
+                    # External operator tool: skip confirmation, compact immediately.
+                    # Used when agent is stuck and can't self-compact.
+                    if turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
+                        print(f"[asdaaas] Force compact: overriding cooldown ({turns_since_compaction} turns)")
+                    if compact_pending:
+                        print(f"[asdaaas] Force compact: clearing pending confirmation")
+                        compact_pending = None
+                        compact_pending_turns = 0
+                    print(f"[asdaaas] Force compact: executing immediately for {agent_name}")
+                    try:
+                        result = compact_session(session_id, rpc_id_counter)
+                        rpc_id_counter += 1
+                        if result:
+                            total_tokens = result.get("totalTokens", total_tokens)
+                            turns_since_compaction = 0
+                            _prev_tokens = total_tokens
+                            _cleanup_compact_doorbells(agent_name)
+                            print(f"[asdaaas] Force compact succeeded: {total_tokens} tokens")
+                        else:
+                            print(f"[asdaaas] Force compact: compact_session returned None")
+                    except Exception as e:
+                        print(f"[asdaaas] Force compact failed: {e}")
+
+                elif action == "interrupt":
+                    # External operator tool: inject a high-priority message into the agent's next prompt.
+                    # Used when agent is stuck/looping and operator needs to break in.
+                    interrupt_text = cmd.get("text", "Operator interrupt: please acknowledge and report status.")
+                    bell_dir = agent_dir(agent_name) / "doorbells"
+                    bell_dir.mkdir(parents=True, exist_ok=True)
+                    bell = {
+                        "adapter": "operator",
+                        "command": "interrupt",
+                        "priority": 0,  # highest priority -- delivered first
+                        "text": f"[OPERATOR INTERRUPT] {interrupt_text}",
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                    fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix="int_")
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(bell, f)
+                    os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+                    # Also cancel any delay -- agent should wake up immediately
+                    next_turn_delay = 0
+                    delay_until_event = False
+                    print(f"[asdaaas] Operator interrupt delivered to {agent_name}")
 
                 elif action == "shutdown":
                     request_shutdown_from_command(agent_name)
@@ -1664,47 +1829,19 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
 
                 if default_doorbell_enabled and not delay_until_event:
                     if next_turn_delay > 0:
-                        # Agent requested a delay. Sleep for the delay duration,
-                        # but check for external events every 0.25s.
-                        delay_remaining = next_turn_delay
                         print(f"[asdaaas] Default doorbell: delaying {next_turn_delay}s")
-                        while delay_remaining > 0:
-                            await asyncio.sleep(min(0.25, delay_remaining))
-                            delay_remaining -= 0.25
-                            # Check for external events during delay
-                            # Use has_pending_doorbells (not poll) to avoid incrementing delivered_count
-                            if _shutdown_requested:
-                                print(f"[asdaaas] Delay interrupted by shutdown")
-                                break
-                            ext_bells = has_pending_doorbells(agent_name)
-                            ext_msgs = has_pending_adapter_messages(agent_name, awareness)
-                            ext_cmd = has_pending_commands(agent_name)
-                            if ext_bells or ext_msgs or ext_cmd:
-                                # External event arrived -- break delay, deliver it
-                                print(f"[asdaaas] Delay interrupted by external event")
-                                # All three checks are NON-DESTRUCTIVE (file existence only).
-                                # The actual destructive reads (poll_adapter_inboxes,
-                                # poll_commands) happen in the main loop after break.
-                                break
+                        interrupted, reason = await run_delay_loop(
+                            agent_name, next_turn_delay, awareness
+                        )
                         next_turn_delay = 0  # reset for next iteration
+                        if interrupted:
+                            print(f"[asdaaas] Delay interrupted by {reason}")
+                            # Skip continue doorbell — external event will be
+                            # picked up on next main loop iteration
+                            continue
 
-                    # Queue the default doorbell (only if no continue doorbell already pending)
-                    bell_dir = agent_dir(agent_name) / "doorbells"
-                    bell_dir.mkdir(parents=True, exist_ok=True)
-                    # Check for existing continue doorbells to avoid accumulation
-                    has_continue = any(f.name.startswith("cont_") for f in bell_dir.glob("*.json"))
-                    if not has_continue:
-                        bell = {
-                            "adapter": "continue",
-                            "priority": 10,  # lowest priority -- other doorbells go first
-                            "text": "Your turn ended. You may continue, delay, or stand by.",
-                            "source": "continue",
-                            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        }
-                        fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix="cont_")
-                        with os.fdopen(fd, "w") as f:
-                            json.dump(bell, f)
-                        os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+                    # Delay expired naturally (or no delay). Queue continue doorbell.
+                    if queue_continue_doorbell(agent_name):
                         print(f"[asdaaas] Default doorbell queued for {agent_name}")
                     # Don't sleep -- next iteration will pick up the doorbell immediately
                     continue
@@ -1712,6 +1849,12 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                 # No default doorbell (legacy mode or until_event). Standard idle poll.
                 await asyncio.sleep(0.25)
                 continue
+
+            # ==== TWO-PASS MESSAGE DELIVERY ====
+            # Pass 1: Classify messages. Handle attention + background immediately.
+            #         Collect in-room messages for batched delivery.
+            # Pass 2: Deliver all in-room messages in a single prompt.
+            in_room_msgs = []
 
             for msg in messages:
                 text = msg.get("text", "").strip()
@@ -1745,22 +1888,21 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                         continue
 
                 # ---- Gaze filtering: is this message in the room? ----
-                # Re-read gaze each message (agent may change it mid-batch)
                 gaze = read_gaze(agent_name)
-                
+
                 if not matches_gaze(msg, gaze):
                     # Background message -- handle per background_channels config
                     mode = get_background_mode(msg, awareness)
-                    
+
                     if mode == "drop":
                         print(f"[asdaaas] DROP: {sender} (via {adapter}) -- not in gaze room")
                         continue
-                    
+
                     elif mode == "pending":
                         pending_queue.add(msg)
                         print(f"[asdaaas] PENDING: queued {sender} (via {adapter}) -- {pending_queue.total} total pending")
                         continue
-                    
+
                     else:  # doorbell
                         bell_text = format_background_doorbell(msg) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                         print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
@@ -1781,10 +1923,33 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                             write_health(agent_name, "active", f"background doorbell response", total_tokens, context_window)
                         continue
 
-                # ---- Message is in the room -- pipe it through ----
-                timer = MessageTimer(agent_name, msg_id)
+                # ---- Message is in the room -- collect for batched delivery ----
+                in_room_msgs.append(msg)
 
-                prompt_text = f"<{sender} (via {adapter})> {text}" + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
+            # ==== Pass 2: Deliver in-room messages ====
+            if in_room_msgs:
+                # Build prompt: single message = original format, multiple = batched
+                if len(in_room_msgs) == 1:
+                    msg = in_room_msgs[0]
+                    sender = msg.get("from", "unknown")
+                    adapter = msg.get("adapter", "unknown")
+                    text = msg.get("text", "").strip()
+                    prompt_text = f"<{sender} (via {adapter})> {text}"
+                else:
+                    # Batched: each message on its own line, attributed
+                    lines = []
+                    for msg in in_room_msgs:
+                        sender = msg.get("from", "unknown")
+                        adapter = msg.get("adapter", "unknown")
+                        text = msg.get("text", "").strip()
+                        lines.append(f"<{sender} (via {adapter})> {text}")
+                    prompt_text = "\n".join(lines)
+                    print(f"[asdaaas] BATCH: {len(in_room_msgs)} messages coalesced into single prompt")
+
+                gaze = read_gaze(agent_name)
+                prompt_text += context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
+                msg_id = in_room_msgs[-1].get("id", f"t{int(time.time()*1000)}")
+                timer = MessageTimer(agent_name, msg_id)
                 print(f"[asdaaas] IN: {prompt_text[:120]}")
 
                 # Drain any stale frames before sending new prompt.
@@ -1826,7 +1991,7 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                     timer.mark("outbox_done")
 
                     # Route model thoughts (agent_thought_chunk) if distinct from speech.
-                    # Some models echo speech as thoughts — skip if identical.
+                    # Some models echo speech as thoughts -- skip if identical.
                     if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
                         write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
 
