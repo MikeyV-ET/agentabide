@@ -52,7 +52,23 @@ class AsdaaasConfig:
             with open(agents_json) as f:
                 return self._normalize(json.load(f))
 
-        # 4. Defaults
+        # 4. Search parent directories (for split layouts like core/ + adapters/)
+        for parent in here.parents:
+            for name in ("config.json", "agents.json"):
+                candidate = parent / name
+                if candidate.is_file():
+                    with open(candidate) as f:
+                        return self._normalize(json.load(f))
+                # Also check core/ subdirectory
+                candidate = parent / "core" / name
+                if candidate.is_file():
+                    with open(candidate) as f:
+                        return self._normalize(json.load(f))
+            # Stop at filesystem root or home
+            if parent == parent.parent or parent == Path.home():
+                break
+
+        # 5. Defaults
         return {}
 
     def _normalize(self, data):

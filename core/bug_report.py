@@ -28,7 +28,11 @@ import time
 import secrets
 from pathlib import Path
 
-from asdaaas_config import config
+try:
+    from asdaaas_config import config
+except ModuleNotFoundError:
+    import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
+    from asdaaas_config import config
 
 BUGS_DIR = config.bugs_dir
 

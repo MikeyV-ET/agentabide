@@ -40,7 +40,11 @@ from pathlib import Path
 # Graceful shutdown flag — set by SIGTERM/SIGINT or "shutdown" command
 _shutdown_requested = False
 
-from asdaaas_config import config
+try:
+    from asdaaas_config import config
+except ModuleNotFoundError:
+    import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
+    from asdaaas_config import config
 
 ASDAAAS_DIR = config.asdaaas_dir
 ADAPTERS_DIR = config.adapters_dir

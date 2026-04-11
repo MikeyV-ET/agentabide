@@ -44,7 +44,11 @@ DEFAULT_POLL_INTERVAL = 1.0
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.5
 CREDS_DIR = os.path.expanduser("~/.mikeyv_creds")
-from asdaaas_config import config
+try:
+    from asdaaas_config import config
+except ModuleNotFoundError:
+    import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
+    from asdaaas_config import config
 DOWNLOAD_DIR = str(config.agents_home / "slack_files")
 MAX_SLACK_MSG_LEN = 3900
 

@@ -31,7 +31,11 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adapter_api
 
-from asdaaas_config import config
+try:
+    from asdaaas_config import config
+except ModuleNotFoundError:
+    import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
+    from asdaaas_config import config
 
 AGENTS_HOME = config.agents_home
 RESULTS_DIR = AGENTS_HOME / "behavioral_tests"
