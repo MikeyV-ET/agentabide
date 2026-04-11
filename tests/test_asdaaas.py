@@ -2080,6 +2080,152 @@ class TestGazeLabel:
 
 
 # ============================================================================
+# Gaze Command (_build_gaze + write_gaze)
+# ============================================================================
+
+class TestBuildGaze:
+    def test_room(self):
+        cmd = {"action": "gaze", "adapter": "irc", "room": "#meetingroom1"}
+        result = asdaaas._build_gaze(cmd)
+        assert result["speech"]["target"] == "irc"
+        assert result["speech"]["params"]["room"] == "#meetingroom1"
+        assert result["thoughts"] is None
+
+    def test_pm(self):
+        cmd = {"action": "gaze", "adapter": "irc", "pm": "eric"}
+        result = asdaaas._build_gaze(cmd)
+        assert result["speech"]["target"] == "irc"
+        assert result["speech"]["params"]["room"] == "pm:eric"
+        assert result["speech"]["params"]["pm"] == "eric"
+
+    def test_off(self):
+        cmd = {"action": "gaze", "off": True}
+        result = asdaaas._build_gaze(cmd)
+        assert result["speech"] is None
+        assert result["thoughts"] is None
+
+    def test_with_thoughts(self):
+        cmd = {"action": "gaze", "adapter": "irc", "room": "#standup", "thoughts": "#sr-thoughts"}
+        result = asdaaas._build_gaze(cmd)
+        assert result["speech"]["params"]["room"] == "#standup"
+        assert result["thoughts"]["target"] == "irc"
+        assert result["thoughts"]["params"]["room"] == "#sr-thoughts"
+
+    def test_no_adapter_returns_none(self):
+        cmd = {"action": "gaze", "room": "#standup"}
+        assert asdaaas._build_gaze(cmd) is None
+
+    def test_no_room_or_pm_returns_none(self):
+        cmd = {"action": "gaze", "adapter": "irc"}
+        assert asdaaas._build_gaze(cmd) is None
+
+    def test_pm_roundtrip_with_get_room(self):
+        """PM gaze built by _build_gaze should be correctly parsed by get_room."""
+        cmd = {"action": "gaze", "adapter": "irc", "pm": "eric"}
+        gaze = asdaaas._build_gaze(cmd)
+        adapter, room = asdaaas.get_room(gaze)
+        assert adapter == "irc"
+        assert room == "pm:eric"
+
+    def test_room_roundtrip_with_matches_gaze(self):
+        """Room gaze should match a message from the same room."""
+        cmd = {"action": "gaze", "adapter": "irc", "room": "#meetingroom1"}
+        gaze = asdaaas._build_gaze(cmd)
+        msg = {"adapter": "irc", "meta": {"room": "#meetingroom1"}}
+        assert asdaaas.matches_gaze(msg, gaze) is True
+
+    def test_room_does_not_match_different_room(self):
+        cmd = {"action": "gaze", "adapter": "irc", "room": "#meetingroom1"}
+        gaze = asdaaas._build_gaze(cmd)
+        msg = {"adapter": "irc", "meta": {"room": "#standup"}}
+        assert asdaaas.matches_gaze(msg, gaze) is False
+
+
+class TestWriteGaze:
+    def test_write_and_read(self, hub_dir):
+        asdaaas.write_gaze("Test", {"speech": {"target": "irc", "params": {"room": "#test"}}, "thoughts": None})
+        gaze = asdaaas.read_gaze("Test")
+        assert gaze["speech"]["params"]["room"] == "#test"
+
+
+# ============================================================================
+# Awareness Command (_apply_awareness_command + write_awareness)
+# ============================================================================
+
+class TestApplyAwarenessCommand:
+    def _base(self):
+        return {
+            "background_channels": {"#standup": "doorbell", "pm:eric": "doorbell"},
+            "background_default": "pending",
+            "doorbell_ttl": {"heartbeat": 1, "irc": 3},
+        }
+
+    def test_add_channel(self):
+        cmd = {"action": "awareness", "add": "#meetingroom1", "mode": "doorbell"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result["background_channels"]["#meetingroom1"] == "doorbell"
+        assert "added" in desc
+
+    def test_add_channel_default_mode(self):
+        cmd = {"action": "awareness", "add": "#newroom"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result["background_channels"]["#newroom"] == "doorbell"
+
+    def test_add_invalid_mode(self):
+        cmd = {"action": "awareness", "add": "#room", "mode": "invalid"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result is None
+
+    def test_remove_channel(self):
+        cmd = {"action": "awareness", "remove": "#standup"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert "#standup" not in result["background_channels"]
+        assert "removed" in desc
+
+    def test_remove_nonexistent(self):
+        cmd = {"action": "awareness", "remove": "#nonexistent"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result is not None  # no-op, not error
+        assert "no-op" in desc
+
+    def test_set_default(self):
+        cmd = {"action": "awareness", "default": "drop"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result["background_default"] == "drop"
+
+    def test_set_invalid_default(self):
+        cmd = {"action": "awareness", "default": "invalid"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result is None
+
+    def test_update_doorbell_ttl(self):
+        cmd = {"action": "awareness", "doorbell_ttl": {"remind": 0, "irc": 5}}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result["doorbell_ttl"]["remind"] == 0
+        assert result["doorbell_ttl"]["irc"] == 5
+        assert result["doorbell_ttl"]["heartbeat"] == 1  # unchanged
+
+    def test_no_subcommand(self):
+        cmd = {"action": "awareness"}
+        result, desc = asdaaas._apply_awareness_command(cmd, self._base())
+        assert result is None
+
+    def test_does_not_mutate_original(self):
+        original = self._base()
+        cmd = {"action": "awareness", "add": "#new", "mode": "doorbell"}
+        asdaaas._apply_awareness_command(cmd, original)
+        assert "#new" not in original["background_channels"]
+
+
+class TestWriteAwareness:
+    def test_write_and_read(self, hub_dir):
+        data = {"background_channels": {"#test": "doorbell"}, "background_default": "pending"}
+        asdaaas.write_awareness("Test", data)
+        result = asdaaas.read_awareness("Test")
+        assert result["background_channels"]["#test"] == "doorbell"
+
+
+# ============================================================================
 # Default Doorbell + Delay Command
 # ============================================================================
 

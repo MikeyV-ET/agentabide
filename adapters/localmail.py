@@ -176,7 +176,9 @@ def ring_doorbell(agent_name: str, msg: dict):
             except (OSError, UnboundLocalError):
                 pass
         preview = text[:500] + "..."
-        bell_text = f"[localmail] Mail from {sender}:\n{preview}\n(Full message: cat {payload_path})"
+        size_kb = len(text) / 1024
+        approx_tokens = len(text) // 4
+        bell_text = f"[localmail] Mail from {sender}:\n{preview}\n(Full message: cat {payload_path} — {size_kb:.1f}KB, ~{approx_tokens} tokens)"
     else:
         bell_text = f"[localmail] Mail from {sender}:\n{text}"
     

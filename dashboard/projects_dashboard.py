@@ -206,6 +206,13 @@ class AgentColumn(Static):
 
     def _full_build(self):
         """Build the full widget tree from scratch."""
+        try:
+            self._do_full_build()
+        except Exception:
+            pass  # Survive bad data or widget race — next refresh will retry
+
+    def _do_full_build(self):
+        """Inner build — separated so _full_build can catch exceptions."""
         data = get_agent_data(self.agent_name)
         scroll = self.query_one(f"#scroll-{self.agent_name}")
         scroll.remove_children()
@@ -289,16 +296,23 @@ class AgentColumn(Static):
     def refresh_data(self) -> None:
         """Update content in place, preserving collapse state.
         Falls back to full rebuild if structure changed."""
-        data = get_agent_data(self.agent_name)
+        try:
+            data = get_agent_data(self.agent_name)
+        except Exception:
+            return  # Bad data read, skip this refresh cycle
 
         if not self._built:
-            self._full_build()
+            try:
+                self._full_build()
+            except Exception:
+                pass
             return
 
         # Check if structure changed (projects added/removed, plan steps changed)
         new_structure = self._structure_key(data)
         if new_structure != self._prev_structure:
-            self._full_build()
+            # Defer rebuild to after current render completes to avoid race
+            self.call_after_refresh(self._full_build)
             return
 
         # In-place update — only change text content, leave Collapsibles alone
@@ -445,13 +459,16 @@ class ProjectsDashboard(App):
         self.set_interval(10, self.action_refresh)
 
     def action_refresh(self) -> None:
-        now = datetime.now(timezone(timedelta(hours=-7)))
-        header = self.query_one("#header-bar", Static)
-        header.update(
-            f" [bold cyan]Projects Dashboard[/]  [dim]{now.strftime('%Y-%m-%d %H:%M:%S PT')}[/]"
-        )
-        for col in self.query(AgentColumn):
-            col.refresh_data()
+        try:
+            now = datetime.now(timezone(timedelta(hours=-7)))
+            header = self.query_one("#header-bar", Static)
+            header.update(
+                f" [bold cyan]Projects Dashboard[/]  [dim]{now.strftime('%Y-%m-%d %H:%M:%S PT')}[/]"
+            )
+            for col in self.query(AgentColumn):
+                col.refresh_data()
+        except Exception:
+            pass  # Never let a refresh crash the app
 
 
 # ============================================================================

@@ -19,7 +19,7 @@ Doorbell format:
   {
     "adapter": "heartbeat",
     "priority": 5,
-    "text": "You've been idle for 15 minutes. Any tasks pending?",
+    "text": "You've been idle for 15 minutes. Last activity: 2026-04-07T14:00:00. Any tasks pending?",
     "idle_seconds": 900,
     "ts": "..."
   }
@@ -160,12 +160,14 @@ def ring_heartbeat_doorbell(agent, idle_seconds):
     bell_dir.mkdir(parents=True, exist_ok=True)
     
     duration = format_idle_time(idle_seconds)
+    last_active = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - idle_seconds))
     
     bell = {
         "adapter": "heartbeat",
         "priority": 5,  # low priority — informational
-        "text": f"You've been idle for {duration}. Any tasks pending or observations to record?",
+        "text": f"You've been idle for {duration}. Last activity: {last_active}. Any tasks pending or observations to record?",
         "idle_seconds": int(idle_seconds),
+        "last_activity": last_active,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     

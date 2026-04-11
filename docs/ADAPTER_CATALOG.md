@@ -3,7 +3,7 @@
 Reference for all adapters in the MikeyV system. Lives alongside ASDAAAS_DESIGN.md.
 See that document for the three adapter types (direct, notify, control) and the contracts that govern them.
 
-Documented: 2026-03-26 by MikeyV-Sr.
+Documented: 2026-03-26 by MikeyV-Sr. Updated: 2026-04-06.
 
 ---
 
@@ -59,11 +59,11 @@ Bridges agents to IRC channels and PMs via miniircd. Each agent gets its own nic
 }
 ```
 
-**Gaze examples:**
+**Gaze commands (write to command queue, do NOT hand-write gaze.json):**
 ```json
-{"speech": {"target": "irc", "params": {"room": "#standup"}}, "thoughts": null}
-{"speech": {"target": "irc", "params": {"room": "pm:eric"}}, "thoughts": null}
-{"speech": {"target": "irc", "params": {"room": "#standup"}}, "thoughts": {"target": "irc", "params": {"room": "#trip-thoughts"}}}
+{"action": "gaze", "adapter": "irc", "room": "#standup"}
+{"action": "gaze", "adapter": "irc", "pm": "eric"}
+{"action": "gaze", "adapter": "irc", "room": "#standup", "thoughts": "#sr-thoughts"}
 ```
 
 The `room` param is an opaque string that asdaaas uses for inbound filtering. The IRC adapter interprets room values for outbound routing: `#channel` names → channel message, `pm:nick` → PRIVMSG to nick. Both are passed through from the gaze file via ASDAAAS — the IRC adapter reads `room` from the outbox message.
@@ -85,7 +85,7 @@ The `room` param is an opaque string that asdaaas uses for inbound filtering. Th
 
 ### Slack (direct)
 
-**Status:** DESIGNED, NOT BUILT.
+**Status:** BUILT by Cinco. Running.
 
 Same pattern as IRC but for Slack workspaces. Adapter holds Slack bot token, connects via Slack API (WebSocket or RTM), pipes messages through ASDAAAS.
 
@@ -360,7 +360,8 @@ All introspection adapters read from data that asdaaas.py already writes (health
 
 ### Context (notify)
 
-**Status:** DESIGNED, NOT BUILT.
+**Status:** BUILT AND RUNNING. 339 lines.
+**File:** `live/comms/context_adapter.py`
 
 Watches the agent's token usage and sends awareness notifications. Reads `totalTokens` from the health file that asdaaas.py writes after each turn.
 
@@ -400,7 +401,8 @@ The agent hears where it stands in its context window. What it does with that in
 
 ### Session (control)
 
-**Status:** DESIGNED, NOT BUILT.
+**Status:** BUILT AND RUNNING. 323 lines.
+**File:** `live/comms/session_adapter.py`
 
 Handles session lifecycle commands. The agent pushes buttons to manage its own session.
 
@@ -452,7 +454,8 @@ Session adapter reads result, writes doorbell to ASDAAAS notification:
 
 ### Heartbeat (notify)
 
-**Status:** DESIGNED, NOT BUILT as adapter. Heartbeat health file exists in asdaaas.py.
+**Status:** BUILT AND RUNNING. 344 lines.
+**File:** `live/comms/heartbeat_adapter.py`
 
 Periodic awareness notification. Tells the agent how long it's been idle, gives it a moment to decide what to do. Check notes, check mail, reflect, or stay idle.
 

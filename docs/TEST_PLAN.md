@@ -1,9 +1,9 @@
 # ASDAAAS Test Coverage Overview
 
-**Last updated:** 2026-03-31
-**Total tests:** 438 (0 regressions)
-**Production code:** ~12,513 lines across 22 files in `live/comms/`
-**Test code:** ~4,766 lines across 7 test files + conftest
+**Last updated:** 2026-04-06
+**Total tests:** 534 (0 regressions)
+**Production code:** ~10,274 lines across 17 files in `live/comms/`
+**Test code:** ~6,685 lines across 9 test files + conftest + mock_agent
 
 ---
 
@@ -13,10 +13,10 @@
 
 | File | Lines | Test File | Tests | Notes |
 |------|------:|-----------|------:|-------|
-| `asdaaas.py` | 1,895 | `test_asdaaas.py` | 178 | Core engine. Best covered |
-| `adapter_api.py` | 1,116 | `test_adapter_api.py` | 56 | Filesystem message passing |
-| `irc_adapter.py` | 626 | `test_irc_adapter.py` | 40 | Extractable functions only |
-| `localmail.py` | 327 | `test_localmail.py` | 28 | Agent-to-agent messaging |
+| `asdaaas.py` | 2,221 | `test_asdaaas.py` | 220 | Core engine. Best covered |
+| `adapter_api.py` | 1,119 | `test_adapter_api.py` | 58 | Filesystem message passing |
+| `irc_adapter.py` | 628 | `test_irc_adapter.py` | 40 | Extractable functions only |
+| `localmail.py` | 342 | `test_localmail.py` | 28 | Agent-to-agent messaging |
 | `remind_adapter.py` | 264 | `test_remind_adapter.py` | 20 | Self-nudge control adapter |
 | `tmux_control.py` | 364 | `test_tmux_control.py` | 23 | Tmux session management |
 | `context_adapter.py` | 339 | `test_phases_4_7.py` | 93* | Context threshold tracking |
@@ -42,9 +42,11 @@
 
 | File | Lines | Tests | Scope |
 |------|------:|------:|-------|
-| `test_asdaaas.py` | 2,168 | 178 | Core: gaze, awareness, outbox, inbox, doorbells, commands, health, profiling, JSON-RPC, attention, collect_response, streaming thoughts, context tags, default doorbell, delay, piggyback ack, graceful shutdown |
+| `test_asdaaas.py` | 2,886 | 220 | Core: gaze, awareness, outbox, inbox, doorbells, commands, health, profiling, JSON-RPC, attention, collect_response, streaming thoughts, context tags, default doorbell, delay, piggyback ack, graceful shutdown, gaze command, awareness command |
 | `test_phases_4_7.py` | 853 | 93 | CommandWatchdog, gaze matching, background mode, PendingQueue, context thresholds, session adapter, heartbeat idle tracker, adapter registration, per-agent prefs |
-| `test_adapter_api.py` | 548 | 56 | write_message, poll_responses, per-adapter inbox/outbox, adapter registration, payloads, attention declarations, request_compact, set_gaze, set_awareness |
+| `test_adapter_api.py` | 572 | 58 | write_message, poll_responses, per-adapter inbox/outbox, adapter registration, payloads, attention declarations, request_compact, set_gaze, set_awareness |
+| `test_e2e.py` | 464 | 18 | Multi-agent multi-user end-to-end: gaze routing, background channels, PM isolation, meeting scenarios, localmail |
+| `test_integration.py` | 466 | 34 | MockAgent: collect_response, speech/thoughts assembly, tool calls, context tags, prompt construction, doorbell format |
 | `test_irc_adapter.py` | 265 | 40 | clean_response, parse_irc_commands, MessageBatcher, nick suppression, thought channels |
 | `test_localmail.py` | 262 | 28 | send_mail, read_mail, peek_mail, ring_doorbell, get_asdaaas_agents, round-trip integration |
 | `test_remind_adapter.py` | 230 | 20 | deliver_doorbell, TimerPool, process_command, integration with asdaaas doorbell format |
@@ -254,7 +256,7 @@
 ### Running Tests
 
 ```bash
-# All tests (438)
+# All tests (534)
 cd ~/projects/mikeyv-infra
 pytest tests/ -v
 

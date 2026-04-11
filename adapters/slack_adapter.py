@@ -592,7 +592,7 @@ async def run_adapter(agents, poll_interval, startup_skip=True):
                                     text=f"[SLACK DM from {msg['user']}]\n{msg['text']}",
                                     sender=msg["user"],
                                     meta={
-                                        "room": f"slack:dm:{poll_channel}",
+                                        "room": poll_channel,
                                         "channel_id": poll_channel,
                                         "slack_ts": msg.get("ts", ""),
                                         "slack_user": msg.get("user", ""),

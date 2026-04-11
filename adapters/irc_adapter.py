@@ -469,7 +469,9 @@ async def run_adapter(agents, channel, host, port):
             if all_pm and len(senders) == 1:
                 room = f"pm:{list(senders)[0]}"
             else:
-                room = channel
+                # Use the actual IRC channel from the message, not the adapter default.
+                # This allows gaze to match #meetingroom1, #standup, etc. correctly.
+                room = msgs[0].get("target", channel)
 
             try:
                 msg_id = adapter_api.write_to_adapter_inbox(

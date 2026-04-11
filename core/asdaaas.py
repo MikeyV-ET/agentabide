@@ -173,6 +173,24 @@ def write_profile(agent_name, timer):
 # HEALTH
 # ============================================================================
 
+_code_version = None  # Set at startup by main()
+
+def get_code_version():
+    """Get the git commit hash of the running asdaaas code."""
+    global _code_version
+    if _code_version is None:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5
+            )
+            _code_version = result.stdout.strip() if result.returncode == 0 else "unknown"
+        except Exception:
+            _code_version = "unknown"
+    return _code_version
+
+
 def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW):
     agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
     health = {
@@ -184,6 +202,7 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         "totalTokens": total_tokens,
         "contextWindow": context_window,
         "last_activity": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "code_version": get_code_version(),
     }
     path = agent_dir(agent_name) / "health.json"
     tmp = str(path) + ".tmp"
@@ -257,6 +276,53 @@ def read_gaze(agent_name):
         return {"speech": {"target": "irc", "params": {"room": "#standup"}}, "thoughts": None}
 
 
+def write_gaze(agent_name, gaze):
+    """Write gaze.json atomically."""
+    agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    gaze_file = agent_dir(agent_name) / "gaze.json"
+    tmp = str(gaze_file) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(gaze, f)
+    os.rename(tmp, str(gaze_file))
+
+
+def _build_gaze(cmd):
+    """Build a gaze dict from a command. Returns None if invalid.
+    
+    Supported forms:
+      {"action": "gaze", "adapter": "irc", "room": "#meetingroom1"}
+      {"action": "gaze", "adapter": "irc", "pm": "eric"}
+      {"action": "gaze", "adapter": "irc", "room": "#standup", "thoughts": "#sr-thoughts"}
+      {"action": "gaze", "off": true}  -- clear gaze
+    """
+    if cmd.get("off"):
+        return {"speech": None, "thoughts": None}
+    
+    adapter = cmd.get("adapter")
+    if not adapter:
+        return None
+    
+    # Build room from either "room" or "pm" key
+    room = cmd.get("room")
+    pm = cmd.get("pm")
+    if room:
+        params = {"room": room}
+    elif pm:
+        params = {"room": f"pm:{pm}", "pm": pm}
+    else:
+        return None
+    
+    speech = {"target": adapter, "params": params}
+    
+    # Optional thoughts target
+    thoughts = None
+    thoughts_room = cmd.get("thoughts")
+    if thoughts_room:
+        thoughts = {"target": adapter, "params": {"room": thoughts_room}}
+    
+    return {"speech": speech, "thoughts": thoughts}
+
+
 # ============================================================================
 # GAZE MATCHING (inbound filtering)
 # ============================================================================
@@ -288,11 +354,18 @@ def gaze_label(gaze):
 
 
 def get_room(gaze):
-    """Extract the room from a gaze's speech target. Returns (adapter, room) tuple."""
+    """Extract the room from a gaze's speech target. Returns (adapter, room) tuple.
+    
+    Handles both canonical form {"room": "pm:eric"} and legacy form {"pm": "eric"}.
+    """
     speech = gaze.get("speech")
     if speech is None:
         return None, None
-    return speech.get("target"), speech.get("params", {}).get("room")
+    params = speech.get("params", {})
+    room = params.get("room")
+    if room is None and "pm" in params:
+        room = f"pm:{params['pm']}"
+    return speech.get("target"), room
 
 
 def get_msg_room(msg):
@@ -508,6 +581,64 @@ def read_awareness(agent_name):
             "notify_watch": [],
             "accept_from": ["*"],
         }
+
+
+def write_awareness(agent_name, awareness):
+    """Write awareness.json atomically."""
+    agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    awareness_file = agent_dir(agent_name) / "awareness.json"
+    tmp = str(awareness_file) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(awareness, f, indent=2)
+    os.rename(tmp, str(awareness_file))
+
+
+def _apply_awareness_command(cmd, current_awareness):
+    """Apply an awareness command to the current awareness dict. Returns updated copy.
+    
+    Supported forms:
+      {"action": "awareness", "add": "#meetingroom1", "mode": "doorbell"}
+      {"action": "awareness", "remove": "#meetingroom1"}
+      {"action": "awareness", "default": "pending"}
+      {"action": "awareness", "doorbell_ttl": {"irc": 3, "heartbeat": 1}}
+    
+    Returns (updated_awareness, description_string) or (None, error_string).
+    """
+    awareness = json.loads(json.dumps(current_awareness))  # deep copy
+    
+    if "add" in cmd:
+        channel = cmd["add"]
+        mode = cmd.get("mode", "doorbell")
+        if mode not in ("doorbell", "pending", "drop"):
+            return None, f"invalid mode: {mode}"
+        bg = awareness.setdefault("background_channels", {})
+        bg[channel] = mode
+        return awareness, f"added {channel}={mode}"
+    
+    if "remove" in cmd:
+        channel = cmd["remove"]
+        bg = awareness.get("background_channels", {})
+        if channel in bg:
+            del bg[channel]
+            return awareness, f"removed {channel}"
+        return awareness, f"{channel} not in background_channels (no-op)"
+    
+    if "default" in cmd:
+        new_default = cmd["default"]
+        if new_default not in ("doorbell", "pending", "drop"):
+            return None, f"invalid default: {new_default}"
+        awareness["background_default"] = new_default
+        return awareness, f"default={new_default}"
+    
+    if "doorbell_ttl" in cmd:
+        ttl_updates = cmd["doorbell_ttl"]
+        if not isinstance(ttl_updates, dict):
+            return None, "doorbell_ttl must be a dict"
+        ttl = awareness.setdefault("doorbell_ttl", {})
+        ttl.update(ttl_updates)
+        return awareness, f"doorbell_ttl updated: {ttl_updates}"
+    
+    return None, "no recognized awareness sub-command"
 
 
 # ============================================================================
@@ -851,12 +982,15 @@ def format_doorbell(bell):
     else:
         prefix = f"[{adapter}"
     
-    # Add id and delivery info
+    # Add id, delivery info, and timestamp
     meta_parts = []
     if bell_id:
         meta_parts.append(f"id={bell_id}")
     if delivered > 1:
         meta_parts.append(f"delivery={delivered}")
+    ts = bell.get("ts")
+    if ts:
+        meta_parts.append(f"ts={ts}")
     
     if meta_parts:
         prefix += f" ({', '.join(meta_parts)})"
@@ -1425,7 +1559,9 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
     # Register in running_agents.json so adapters can find us
     _register_running_agent(agent_name, agent_cwd)
 
-    print(f"[asdaaas] ASDAAAS v2 starting for {agent_name}")
+    # Capture code version at startup (cached for lifetime of process)
+    version = get_code_version()
+    print(f"[asdaaas] ASDAAAS v2 starting for {agent_name} (code: {version})")
     print(f"[asdaaas] Spawning grok agent stdio...")
     proc = await asyncio.create_subprocess_exec(
         "grok", "agent", "stdio",
@@ -1751,6 +1887,34 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
                     request_shutdown_from_command(agent_name)
                     # Flag is set; loop will break at top of next iteration
                     # (current turn is already between turns, so exit is immediate)
+
+                elif action == "gaze":
+                    # Set gaze target. Validates and writes gaze.json.
+                    # Usage: {"action": "gaze", "adapter": "irc", "room": "#meetingroom1"}
+                    #        {"action": "gaze", "adapter": "irc", "pm": "eric"}
+                    #        {"action": "gaze", "off": true}  -- clear gaze
+                    new_gaze = _build_gaze(cmd)
+                    if new_gaze is not None:
+                        write_gaze(agent_name, new_gaze)
+                        _, room = get_room(new_gaze)
+                        print(f"[asdaaas] GAZE: {agent_name} -> {cmd.get('adapter', 'off')}:{room or 'none'}")
+                    else:
+                        print(f"[asdaaas] GAZE: invalid command: {cmd}")
+
+                elif action == "awareness":
+                    # Modify awareness config. Reads current, applies change, writes back.
+                    # Usage: {"action": "awareness", "add": "#meetingroom1", "mode": "doorbell"}
+                    #        {"action": "awareness", "remove": "#meetingroom1"}
+                    #        {"action": "awareness", "default": "pending"}
+                    #        {"action": "awareness", "doorbell_ttl": {"irc": 3}}
+                    current = read_awareness(agent_name)
+                    updated, desc = _apply_awareness_command(cmd, current)
+                    if updated is not None:
+                        write_awareness(agent_name, updated)
+                        awareness = updated  # refresh local copy
+                        print(f"[asdaaas] AWARENESS: {agent_name} -- {desc}")
+                    else:
+                        print(f"[asdaaas] AWARENESS: error for {agent_name} -- {desc}")
 
             # ---- 1b. Check watchdog timeouts (Phase 4.4) ----
             watchdog.deliver_timeout_doorbells(agent_name)
