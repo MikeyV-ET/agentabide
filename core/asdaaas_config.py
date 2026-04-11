@@ -31,6 +31,8 @@ class AsdaaasConfig:
         self._asdaaas_dir = Path(self._data.get("asdaaas_dir",
             os.path.expanduser("~/asdaaas")))
         self._agents = self._data.get("agents", {})
+        self._grok_sessions_dir = self._resolve_sessions_dir(
+            self._data.get("grok_sessions_dir"))
 
     def _load(self):
         # 1. Env var
@@ -81,6 +83,29 @@ class AsdaaasConfig:
             data["asdaaas_dir"] = settings.get("asdaaas_system_dir",
                 os.path.expanduser("~/asdaaas"))
         return data
+
+    def _resolve_sessions_dir(self, explicit):
+        """Find grok sessions directory. Explicit config wins, then auto-detect."""
+        if explicit:
+            return Path(explicit)
+        # Standard location
+        standard = Path.home() / ".grok" / "sessions"
+        if standard.is_dir():
+            return standard
+        # Multi-user grok install: ~/.grok-users/<identity>/.grok/sessions/
+        grok_users = Path.home() / ".grok-users"
+        if grok_users.is_dir():
+            for user_dir in grok_users.iterdir():
+                candidate = user_dir / ".grok" / "sessions"
+                if candidate.is_dir():
+                    return candidate
+        # Fallback to standard (may not exist yet)
+        return standard
+
+    @property
+    def grok_sessions_dir(self) -> Path:
+        """Directory containing grok session data."""
+        return self._grok_sessions_dir
 
     @property
     def agents_home(self) -> Path:

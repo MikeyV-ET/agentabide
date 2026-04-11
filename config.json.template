@@ -4,6 +4,7 @@
 
   "agents_home": "/home/youruser/agents",
   "asdaaas_dir": "/home/youruser/asdaaas",
+  "grok_sessions_dir": "/home/youruser/.grok/sessions",
 
   "agents": {
     "AgentOne": {

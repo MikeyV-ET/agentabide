@@ -170,7 +170,7 @@ class Config:
         if cls.UPDATES_FILE:
             return Path(cls.UPDATES_FILE)
         # Auto-detect from ~/.grok/sessions/
-        sessions_root = Path.home() / ".grok" / "sessions"
+        sessions_root = _asdaaas_config.grok_sessions_dir
         # Agent workspace path encoded as directory name
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
@@ -189,7 +189,7 @@ class Config:
     @classmethod
     def find_signals_file(cls) -> Optional[Path]:
         """Find signals.json for context window info."""
-        sessions_root = Path.home() / ".grok" / "sessions"
+        sessions_root = _asdaaas_config.grok_sessions_dir
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
@@ -1897,7 +1897,7 @@ Type anything else to send a message to the agent.
 
                 # Read signals for context %
                 try:
-                    sessions_root = Path.home() / ".grok" / "sessions"
+                    sessions_root = _asdaaas_config.grok_sessions_dir
                     encoded = str(agent_dir).replace("/", "%2F")
                     session_dir = sessions_root / encoded
                     if session_dir.exists():
@@ -1980,7 +1980,7 @@ Type anything else to send a message to the agent.
 
     def _find_updates_for_agent(self, agent_name: str) -> Optional[Path]:
         """Find updates.jsonl for a specific agent."""
-        sessions_root = Path.home() / ".grok" / "sessions"
+        sessions_root = _asdaaas_config.grok_sessions_dir
         agent_path = Path(Config.AGENTS_HOME) / agent_name
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
