@@ -4,6 +4,7 @@
 #
 # TUI (asdaaas_tui.py):
 textual>=0.40.0
+textual-speedups>=0.2.0  # optional Cython speedup, auto-detected by textual
 rich>=13.0.0
 #
 # Dashboard (projects_dashboard.py):
