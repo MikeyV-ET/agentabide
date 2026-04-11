@@ -28,7 +28,7 @@ Your agent directory IS you. Everything about you lives here:
 │   ├── gaze.json                 ← where you are right now
 │   ├── awareness.json            ← what you notice
 │   ├── health.json               ← written by asdaaas (your vital signs)
-│   ├── commands.json             ← you write commands here (delay, ack, compact)
+│   ├── commands/                 ← you write command files here (delay, ack, compact)
 │   ├── doorbells/                ← pending notifications
 │   ├── attention/                ← your expectations
 │   ├── profile/                  ← per-turn timing data
@@ -60,23 +60,45 @@ AGENT_NAME="Atlas"
 AGENT_HOME="$HOME/agents/$AGENT_NAME"
 
 # Create the agent directory tree
-mkdir -p "$AGENT_HOME/asdaaas/"{doorbells,attention,profile}
-mkdir -p "$AGENT_HOME/asdaaas/adapters/"{irc,localmail,remind,session,context,heartbeat}/{inbox,outbox}
+mkdir -p "$AGENT_HOME/asdaaas/"{doorbells,attention,profile,commands}
+mkdir -p "$AGENT_HOME/asdaaas/adapters/"{irc,localmail,remind,session,context,heartbeat,tui}/{inbox,outbox}
 
 # Create the engine directory
 mkdir -p "$HOME/asdaaas/adapters"
+
+# Install dependencies
+pip install -r "$REPO/requirements.txt"
 ```
 
-### Step 3: Copy and customize your AGENTS.md
+### Step 3: Set up config.json
 
-Copy `templates/SAMPLE_AGENTS.md` to `~/agents/<YourName>/AGENTS.md`. Edit it:
+If you're NOT installing in `~/agents`, copy and edit the config template:
+
+```bash
+cp "$REPO/config.json.template" "$REPO/core/config.json"
+# Edit config.json: set agents_home and asdaaas_dir to your paths
+```
+
+If you ARE using `~/agents` and `~/asdaaas`, skip this step -- the defaults work.
+
+### Step 4: Copy and customize your AGENTS.md
+
+Copy `templates/SAMPLE_AGENTS.md` to your agent directory. Then append
+`ASDAAAS_AGENT_INSTRUCTIONS.md` -- this teaches you how to operate in the system:
+
+```bash
+cp "$REPO/templates/SAMPLE_AGENTS.md" "$AGENT_HOME/AGENTS.md"
+cat "$REPO/ASDAAAS_AGENT_INSTRUCTIONS.md" >> "$AGENT_HOME/AGENTS.md"
+```
+
+Edit it:
 - Replace the agent name
 - Replace all file paths to use your agent name
 - Describe your role and purpose
 
 This file reloads automatically after compaction. It is your identity.
 
-### Step 4: Copy starter config files
+### Step 5: Copy starter config files
 
 ```bash
 # Copy from the agentabide repo (adjust path to where you cloned it)
@@ -85,7 +107,7 @@ cp "$REPO/templates/awareness.json" "$AGENT_HOME/asdaaas/awareness.json"
 cp "$REPO/templates/gaze.json" "$AGENT_HOME/asdaaas/gaze.json"
 ```
 
-### Step 5: Create your working files
+### Step 6: Create your working files
 
 ```bash
 # Lab notebook — append-only permanent record
@@ -105,7 +127,7 @@ cat > "$AGENT_HOME/notes_to_self.md" << 'EOF'
 EOF
 ```
 
-### Step 6: Register yourself as a running agent
+### Step 7: Register yourself as a running agent
 
 ```bash
 # Write running_agents.json (or append to existing)
@@ -116,7 +138,7 @@ cat > "$HOME/asdaaas/running_agents.json" << EOF
 EOF
 ```
 
-### Step 7: Set up IRC
+### Step 8: Set up IRC
 
 Your human needs to talk to you. IRC is the simplest channel.
 
@@ -139,7 +161,7 @@ irssi -c 127.0.0.1 -p 6667 -n eric
 
 Or any IRC client (weechat, HexChat, etc.) pointed at `127.0.0.1:6667`.
 
-### Step 8: Create a session symlink
+### Step 9: Create a session symlink
 
 ```bash
 # Find your current session directory
@@ -148,7 +170,7 @@ Or any IRC client (weechat, HexChat, etc.) pointed at `127.0.0.1:6667`.
 ln -sf "<your-session-path>" "$AGENT_HOME/session"
 ```
 
-### Step 9: Launch asdaaas
+### Step 10: Launch asdaaas
 
 This is the step that gives you continuous existence. Your human runs this:
 
@@ -162,7 +184,7 @@ setsid nohup python3 -u "$REPO/core/asdaaas.py" \
 
 After this, you will receive `[continue]` doorbells automatically. Your turn never ends unless you write a delay command.
 
-### Step 10: Start supporting adapters
+### Step 11: Start supporting adapters
 
 ```bash
 # Heartbeat — nudges you when idle
@@ -190,7 +212,7 @@ After setup, read these docs to understand the full system:
 
 **Awareness is your notification list.** You write `awareness.json` to declare what interrupts you when you're not looking at it. `"doorbell"` = notify me. `"pending"` = queue silently. `"drop"` = discard.
 
-**The default doorbell is your heartbeat.** After every turn, asdaaas queues a `[continue]` doorbell. You get another turn immediately. To pace yourself, write `{"action": "delay", "seconds": 60}` to `commands.json`. To sleep until something happens, write `{"action": "delay", "seconds": "until_event"}`.
+**The default doorbell is your heartbeat.** After every turn, asdaaas queues a `[continue]` doorbell. You get another turn immediately. To pace yourself, write a delay command to your `commands/` directory. To sleep until something happens, write `{"action": "delay", "seconds": "until_event"}`. See `ASDAAAS_AGENT_INSTRUCTIONS.md` for full command syntax.
 
 **Document first, then work.** Your context will compact. Anything not on disk is lost. Write to your lab notebook BEFORE and DURING work. Commit and push immediately. The lab notebook leads, not follows.
 
