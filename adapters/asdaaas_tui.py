@@ -93,18 +93,36 @@ class Gruvbox:
 # Configuration
 # =============================================================================
 
-try:
-    from asdaaas_config import config
-except ModuleNotFoundError:
-    import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
-    from asdaaas_config import config as _asdaaas_config
-
 class Config:
     """Runtime configuration, set from CLI args."""
     AGENT_NAME: str = "Trip"
-    AGENTS_HOME: str = str(_asdaaas_config.agents_home)
-    SESSION_DIR: Optional[str] = None  # Auto-detected from ~/.grok/sessions/
+    AGENTS_HOME: str = os.path.expanduser("~/agents")
+    GROK_SESSIONS_DIR: Optional[str] = None  # Override for session directory
+    SESSION_DIR: Optional[str] = None  # Auto-detected from sessions root
     UPDATES_FILE: Optional[str] = None  # Path to updates.jsonl
+
+    @classmethod
+    def sessions_root(cls) -> Path:
+        """Get the grok sessions root directory."""
+        if cls.GROK_SESSIONS_DIR:
+            return Path(cls.GROK_SESSIONS_DIR)
+        try:
+            from asdaaas_config import config as asdaaas_cfg
+            return asdaaas_cfg.grok_sessions_dir
+        except ImportError:
+            pass
+        # Fallback: auto-detect
+        standard = Path.home() / ".grok" / "sessions"
+        if standard.exists():
+            return standard
+        grok_users = Path.home() / ".grok-users"
+        if grok_users.exists():
+            for user_dir in grok_users.iterdir():
+                candidate = user_dir / ".grok" / "sessions"
+                if candidate.exists():
+                    return candidate
+        return standard
+
     OPERATOR_NAME: Optional[str] = None  # Who is using this TUI
     OPERATOR_FILE: Path = Path.home() / ".config" / "abidetui" / "operator.json"
 
@@ -169,9 +187,7 @@ class Config:
         """Find the updates.jsonl for this agent's session."""
         if cls.UPDATES_FILE:
             return Path(cls.UPDATES_FILE)
-        # Auto-detect from ~/.grok/sessions/
-        sessions_root = _asdaaas_config.grok_sessions_dir
-        # Agent workspace path encoded as directory name
+        sessions_root = cls.sessions_root()
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
@@ -189,7 +205,7 @@ class Config:
     @classmethod
     def find_signals_file(cls) -> Optional[Path]:
         """Find signals.json for context window info."""
-        sessions_root = _asdaaas_config.grok_sessions_dir
+        sessions_root = cls.sessions_root()
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
@@ -1897,7 +1913,7 @@ Type anything else to send a message to the agent.
 
                 # Read signals for context %
                 try:
-                    sessions_root = _asdaaas_config.grok_sessions_dir
+                    sessions_root = Config.sessions_root()
                     encoded = str(agent_dir).replace("/", "%2F")
                     session_dir = sessions_root / encoded
                     if session_dir.exists():
@@ -1980,7 +1996,7 @@ Type anything else to send a message to the agent.
 
     def _find_updates_for_agent(self, agent_name: str) -> Optional[Path]:
         """Find updates.jsonl for a specific agent."""
-        sessions_root = _asdaaas_config.grok_sessions_dir
+        sessions_root = Config.sessions_root()
         agent_path = Path(Config.AGENTS_HOME) / agent_name
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
@@ -2504,7 +2520,7 @@ def main():
         help="Agent name (default: Trip)"
     )
     parser.add_argument(
-        "--agents-home", default=str(_asdaaas_config.agents_home),
+        "--agents-home", default=os.path.expanduser("~/agents"),
         help="Agents home directory (default: ~/agents)"
     )
     parser.add_argument(
@@ -2523,11 +2539,16 @@ def main():
         "--operator", "-o", default=None,
         help="Operator name (skips the 'Who are you?' prompt)"
     )
+    parser.add_argument(
+        "--sessions-dir", default=None,
+        help="Grok sessions directory (default: auto-detect ~/.grok/sessions/ or .grok-users/)"
+    )
     args = parser.parse_args()
 
     Config.AGENT_NAME = args.agent
     Config.AGENTS_HOME = args.agents_home
     Config.UPDATES_FILE = args.updates
+    Config.GROK_SESSIONS_DIR = args.sessions_dir
     if args.operator:
         Config.OPERATOR_NAME = args.operator
         # Don't save to disk — --operator is ephemeral for test instances
