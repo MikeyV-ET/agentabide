@@ -51,9 +51,10 @@ import adapter_api
 # PATHS
 # ============================================================================
 
-HUB_DIR = Path(os.path.expanduser("~/asdaaas"))
+from asdaaas_config import config
+HUB_DIR = config.hub_dir
 AGENTS_DIR = HUB_DIR / "agents"  # legacy
-AGENTS_HOME_DIR = Path(os.path.expanduser("~/agents"))
+AGENTS_HOME_DIR = config.agents_home
 SESSION_INBOX = HUB_DIR / "adapters" / "session" / "inbox"
 # Legacy aliases for test monkeypatching
 HEALTH_DIR = AGENTS_DIR

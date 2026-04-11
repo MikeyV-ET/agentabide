@@ -40,32 +40,26 @@ from pathlib import Path
 # Graceful shutdown flag — set by SIGTERM/SIGINT or "shutdown" command
 _shutdown_requested = False
 
-ASDAAAS_DIR = Path(os.path.expanduser("~/asdaaas"))
-ADAPTERS_DIR = ASDAAAS_DIR / "adapters"
+from asdaaas_config import config
 
-# Agent-centric directory model:
-# Each agent's runtime state lives at ~/agents/<AgentName>/asdaaas/
-# AGENTS_HOME_DIR is the parent that contains all agent directories.
-AGENTS_HOME_DIR = Path(os.path.expanduser("~/agents"))
+ASDAAAS_DIR = config.asdaaas_dir
+ADAPTERS_DIR = config.adapters_dir
+AGENTS_HOME_DIR = config.agents_home
 
-# Legacy compat — adapters, tests, and other modules still reference these
-HUB_DIR = ASDAAAS_DIR
-AGENTS_DIR = ASDAAAS_DIR / "agents"  # legacy
-INBOX_DIR = ASDAAAS_DIR / "inbox"    # legacy universal inbox
-OUTBOX_DIR = ASDAAAS_DIR / "outbox"  # legacy universal outbox
+# Legacy compat aliases
+HUB_DIR = config.hub_dir
+AGENTS_DIR = ASDAAAS_DIR / "agents"
+INBOX_DIR = config.inbox_dir
+OUTBOX_DIR = config.outbox_dir
 
 
 def agent_dir(agent_name):
-    """Return the per-agent runtime directory: ~/agents/<AgentName>/asdaaas/
-    
-    In the agent-centric model, all runtime state lives under the agent's
-    home directory: ~/agents/<AgentName>/asdaaas/.
-    """
+    """Return the per-agent runtime directory."""
     return AGENTS_HOME_DIR / agent_name / "asdaaas"
 
 CONTEXT_WINDOW = 200000  # default, updated from capabilities if available
 
-RUNNING_AGENTS_FILE = ASDAAAS_DIR / "running_agents.json"
+RUNNING_AGENTS_FILE = config.running_agents_file
 
 
 def _register_running_agent(agent_name, home_path):
@@ -1538,7 +1532,7 @@ def request_shutdown_from_command(agent_name):
 # MAIN LOOP
 # ============================================================================
 
-async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
+async def main(agent_name, session_id=None, agent_cwd=None):
     global _shutdown_requested
 
     # Register signal handlers for graceful shutdown
@@ -1546,7 +1540,10 @@ async def main(agent_name, session_id=None, agent_cwd="/home/eric"):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _request_shutdown, sig, agent_name)
 
-    # Create per-agent directory structure (agent-centric: ~/agents/<name>/asdaaas/...)
+    if agent_cwd is None:
+        agent_cwd = str(config.agent_home(agent_name))
+
+    # Create per-agent directory structure
     a_dir = agent_dir(agent_name)
     a_dir.mkdir(parents=True, exist_ok=True)
     (a_dir / "doorbells").mkdir(parents=True, exist_ok=True)
@@ -2214,7 +2211,7 @@ def _unregister_running_agent(agent_name):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ASDAAAS v2")
     parser.add_argument("--agent", default="Test", help="Agent name")
-    parser.add_argument("--cwd", default="/home/eric", help="Working directory for agent")
+    parser.add_argument("--cwd", default=str(config.agents_home.parent), help="Working directory for agent")
     parser.add_argument("--session", default=None, help="Session ID to load")
     args = parser.parse_args()
 

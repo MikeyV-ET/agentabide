@@ -46,9 +46,10 @@ def tprint(msg):
 # CONFIG
 # ============================================================================
 
-HUB_DIR = Path(os.path.expanduser("~/asdaaas"))
+from asdaaas_config import config
+HUB_DIR = config.hub_dir
 AGENTS_DIR = HUB_DIR / "agents"  # legacy
-AGENTS_HOME_DIR = Path(os.path.expanduser("~/agents"))
+AGENTS_HOME_DIR = config.agents_home
 DOORBELL_DIR = AGENTS_DIR  # legacy alias for test monkeypatching
 ADAPTER_NAME = "remind"
 POLL_INTERVAL = 0.25  # check for new commands 4x/sec

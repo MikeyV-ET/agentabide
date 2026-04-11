@@ -40,11 +40,13 @@ from typing import Optional
 # PATHS
 # ============================================================================
 
-HUB_DIR = Path(os.path.expanduser("~/asdaaas"))
+from asdaaas_config import config
+
+HUB_DIR = config.hub_dir
 AGENTS_DIR = HUB_DIR / "agents"  # legacy
-AGENTS_HOME_DIR = Path(os.path.expanduser("~/agents"))
-INBOX_DIR = HUB_DIR / "inbox"
-OUTBOX_DIR = HUB_DIR / "outbox"
+AGENTS_HOME_DIR = config.agents_home
+INBOX_DIR = config.inbox_dir
+OUTBOX_DIR = config.outbox_dir
 
 
 def ensure_dirs(adapter_name: Optional[str] = None):

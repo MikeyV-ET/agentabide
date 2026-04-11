@@ -88,9 +88,10 @@ ADAPTER_CONFIG = {
 }
 
 # ASDAAAS paths
-HUB_DIR = Path(os.path.expanduser("~/asdaaas"))
+from asdaaas_config import config
+HUB_DIR = config.hub_dir
 AGENTS_DIR = HUB_DIR / "agents"  # legacy
-AGENTS_HOME_DIR = Path(os.path.expanduser("~/agents"))
+AGENTS_HOME_DIR = config.agents_home
 
 
 # Logging

@@ -28,7 +28,9 @@ import time
 import secrets
 from pathlib import Path
 
-BUGS_DIR = Path(os.path.expanduser("~/agents/bugs"))
+from asdaaas_config import config
+
+BUGS_DIR = config.bugs_dir
 
 
 def _next_id():

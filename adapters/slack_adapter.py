@@ -44,7 +44,8 @@ DEFAULT_POLL_INTERVAL = 1.0
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.5
 CREDS_DIR = os.path.expanduser("~/.mikeyv_creds")
-DOWNLOAD_DIR = os.path.expanduser("~/agents/slack_files")
+from asdaaas_config import config
+DOWNLOAD_DIR = str(config.agents_home / "slack_files")
 MAX_SLACK_MSG_LEN = 3900
 
 # Per-agent Slack credentials: each agent can have their own bot token + DM channel
@@ -54,7 +55,7 @@ DEFAULT_DM_CHANNEL = "D0AMVLN05PG"
 DEFAULT_BOT_USER_ID = "U0ANRNVFL72"
 
 AGENT_NAMES = ["Sr", "Jr", "Trip", "Q", "Cinco"]
-AGENTS_DIR = os.path.expanduser("~/agents")
+AGENTS_DIR = str(config.agents_home)
 
 AGENT_ALIASES = {
     "sr": "Sr", "senior": "Sr", "mikeyv-sr": "Sr",

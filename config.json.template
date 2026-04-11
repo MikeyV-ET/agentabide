@@ -1,0 +1,20 @@
+{
+  "_comment": "ASDAAAS configuration. Copy to config.json and edit paths.",
+  "_comment2": "All paths are absolute. Defaults: ~/agents and ~/asdaaas.",
+
+  "agents_home": "/home/youruser/agents",
+  "asdaaas_dir": "/home/youruser/asdaaas",
+
+  "agents": {
+    "AgentOne": {
+      "session": "your-session-uuid-here",
+      "model": "coding-mix-latest",
+      "short_id": "abcd"
+    },
+    "AgentTwo": {
+      "session": "your-session-uuid-here",
+      "model": "coding-mix-latest",
+      "short_id": "efgh"
+    }
+  }
+}

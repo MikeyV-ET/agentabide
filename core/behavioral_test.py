@@ -31,9 +31,11 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adapter_api
 
-AGENTS_HOME = Path(os.path.expanduser("~/agents"))
+from asdaaas_config import config
+
+AGENTS_HOME = config.agents_home
 RESULTS_DIR = AGENTS_HOME / "behavioral_tests"
-REMIND_INBOX = lambda agent: AGENTS_HOME / agent / "asdaaas" / "adapters" / "remind" / "inbox"
+REMIND_INBOX = lambda agent: config.agent_adapter_inbox(agent, "remind")
 
 
 # ============================================================================

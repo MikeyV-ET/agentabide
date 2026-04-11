@@ -65,9 +65,11 @@ from datetime import datetime
 # CONFIGURATION
 # ============================================================================
 
+from asdaaas_config import config as _asdaaas_config
+
 class Config:
     """Mutable global configuration."""
-    agents_home = Path(os.path.expanduser("~/agents"))
+    agents_home = _asdaaas_config.agents_home
     adapter_name = "tui"
     poll_interval = 0.3  # seconds between outbox polls
     health_poll_interval = 2.0  # seconds between health checks

@@ -93,10 +93,12 @@ class Gruvbox:
 # Configuration
 # =============================================================================
 
+from asdaaas_config import config as _asdaaas_config
+
 class Config:
     """Runtime configuration, set from CLI args."""
     AGENT_NAME: str = "Trip"
-    AGENTS_HOME: str = os.path.expanduser("~/agents")
+    AGENTS_HOME: str = str(_asdaaas_config.agents_home)
     SESSION_DIR: Optional[str] = None  # Auto-detected from ~/.grok/sessions/
     UPDATES_FILE: Optional[str] = None  # Path to updates.jsonl
     OPERATOR_NAME: Optional[str] = None  # Who is using this TUI
@@ -2498,7 +2500,7 @@ def main():
         help="Agent name (default: Trip)"
     )
     parser.add_argument(
-        "--agents-home", default=os.path.expanduser("~/agents"),
+        "--agents-home", default=str(_asdaaas_config.agents_home),
         help="Agents home directory (default: ~/agents)"
     )
     parser.add_argument(
