@@ -1,130 +1,121 @@
-# MikeyV Adapter Pattern
+# ASDAAAS Adapter Pattern
 
 ## Overview
 
-The hub (mikeyv_hub.py) is evolving toward a **pure routing layer**. Transport-specific
-code (IRC, Slack, voice, web) lives in standalone **adapter** processes that communicate
-with the hub via a filesystem-based message bus (adapter_api.py).
+Adapters connect ASDAAAS agents to external systems (IRC, Slack, TUI, etc.).
+Each adapter is a standalone process that communicates with agents via the
+filesystem-based message bus (`adapter_api.py`).
 
 ## Architecture
 
 ```
-  [IRC client]          [Slack API]          [Voice pipeline]
-       |                     |                      |
-  irc_adapter.py       slack_adapter.py       voice_adapter.py
-       |                     |                      |
-       +--------- adapter_api.py -------------------+
-                   |                   |
-            ~/asdaaas/inbox/   ~/asdaaas/outbox/<adapter>/
-                   |                   |
-              mikeyv_hub.py (routing layer)
-                   |
-            leader_callback_client.py
-                   |
-              [Agent sessions]
+  [IRC]         [Slack]        [TUI]         [Your transport]
+    |               |            |                 |
+  irc_adapter   slack_adapter  tui_adapter    your_adapter
+    |               |            |                 |
+    +---------- adapter_api.py --------------------+
+                    |                    |
+    ~/agents/<Agent>/asdaaas/adapters/<name>/inbox/    (inbound)
+    ~/agents/<Agent>/asdaaas/adapters/<name>/outbox/   (outbound)
+                    |
+               asdaaas.py (per-agent engine)
 ```
+
+## Adapter Types
+
+| Type | Role | Examples |
+|------|------|---------|
+| **Direct** | Two-way transport (mouth + ear) | IRC, Slack, TUI |
+| **Notify** | Doorbell-only (pointer to data) | Localmail, Context |
+| **Control** | Button + receipt (command/result) | Session, Impress, Meet |
 
 ## Message Flow
 
-### Inbound (user -> agent)
-1. Adapter receives message from external transport (IRC PRIVMSG, Slack event, etc.)
-2. Adapter calls `adapter_api.write_message(to, text, adapter, sender, meta)`
-3. Hub polls `~/asdaaas/inbox/` every 500ms
-4. Hub parses target agent, delivers via leader callback
-5. Hub writes agent response to `~/asdaaas/outbox/<adapter>/`
+### Inbound (external -> agent)
+1. Adapter receives from external transport
+2. Adapter calls `adapter_api.write_to_adapter_inbox(adapter_name, to, text, sender, meta)`
+3. ASDAAAS polls agent's adapter inboxes, delivers as prompt or doorbell
+4. Agent responds
 
-### Outbound (agent -> user)
-1. Hub writes response JSON to `~/asdaaas/outbox/<adapter>/`
-2. Adapter polls its outbox via `adapter_api.poll_responses(adapter_name)`
-3. Adapter posts response to external transport
+### Outbound (agent -> external)
+1. ASDAAAS writes agent speech to gaze-targeted adapter outbox
+2. Adapter polls `adapter_api.poll_adapter_outbox(adapter_name, agent_name)`
+3. Adapter sends to external transport
 
-## adapter_api.py Reference
+## Complete Adapter Package Checklist
 
-| Function | Caller | Purpose |
-|----------|--------|---------|
-| `write_message(to, text, adapter, sender, meta)` | Adapter | Send message to hub inbox |
-| `poll_responses(adapter_name, delete=True)` | Adapter | Read responses from outbox |
-| `write_response(adapter_name, request_id, from_agent, text, meta)` | Hub | Write response to adapter outbox |
-| `ensure_dirs(adapter_name)` | Both | Create required directories |
+A "shippable" adapter includes all of the following:
 
-## Message Format
-
-### Inbox message (adapter -> hub)
-```json
-{
-  "id":      "uuid",
-  "from":    "eric",
-  "to":      "Sr",
-  "text":    "message body",
-  "adapter": "irc",
-  "meta":    {"channel": "#standup", "nick": "eric"},
-  "ts":      "2026-03-24T04:13:00"
-}
+### Required Files
+```
+adapters/
+  your_adapter.py       # The adapter process
+ops/
+  launch_your_adapter.sh  # Launch script (setsid nohup, log rotation)
+tests/
+  test_your_adapter.py  # Unit tests
 ```
 
-### Outbox response (hub -> adapter)
-```json
-{
-  "id":          "uuid",
-  "request_id":  "original-msg-uuid",
-  "from":        "Sr",
-  "text":        "agent response text",
-  "adapter":     "irc",
-  "meta":        {},
-  "ts":          "2026-03-24T04:13:05"
-}
-```
+### Required in your_adapter.py
+- [ ] Import `adapter_api` and `asdaaas_config`
+- [ ] Call `adapter_api.ensure_dirs(ADAPTER_NAME)` at startup
+- [ ] Call `adapter_api.register_adapter(name, capabilities, config)` at startup
+- [ ] Write inbound messages via `adapter_api.write_to_adapter_inbox()`
+- [ ] Poll outbound via `adapter_api.poll_adapter_outbox()`
+- [ ] Handle `clean_response()` for output filtering (suppress `noted`, strip headers)
+- [ ] Periodic heartbeat via `adapter_api.update_heartbeat(ADAPTER_NAME)`
+- [ ] Graceful shutdown on SIGTERM
+- [ ] `argparse` CLI with `--agents` flag for agent subset
+- [ ] Timestamped logging via `tprint()` or `logging`
 
-## Existing Adapters
+### Required Documentation
+- [ ] Docstring at top of adapter file explaining what it connects to
+- [ ] Entry in `ADAPTER_CATALOG.md` with status, capabilities, config
+- [ ] Any external dependencies listed in `requirements.txt`
+- [ ] Entry in `sync_to_public.sh` mappings (if syncing to public repo)
 
-### IRC Adapter (irc_adapter.py) -- RUNNING
-- Nick: MikeyV-IRC
-- Channel: #standup
-- Connects to miniircd at 127.0.0.1:6667
-- Parses target agent from message text (e.g., "Sr: hello" -> routes to Sr)
-- Supports broadcast aliases ("gang", "everyone", "all", "team")
-- Truncates long responses for IRC (line splitting)
-- Batch window: 2s (collects multi-line responses before posting)
+### Required Tests
+- [ ] Message parsing (inbound format -> adapter_api calls)
+- [ ] Response cleaning (suppress noted, strip headers, handle edge cases)
+- [ ] CLI argument parsing
+- [ ] At least one integration test with mock agent data
 
-### Slack -- NOT YET EXTRACTED
-Slack is still built into the hub (~150 lines in SlackClient class). See extraction plan below.
+### If External Dependencies
+- [ ] Listed in `requirements.txt` with version constraint
+- [ ] Documented in adapter docstring
+- [ ] Adapter fails gracefully with clear error if dependency missing
 
-## Slack Adapter Extraction Plan
+## Developer Shipping Checklist
 
-### What to extract from the hub
-1. SlackClient class (lines ~163-275): token loading, API calls, DM polling, message posting
-2. Slack polling loop in run_hub(): the slack_interval check and message processing
-3. Slack CLI args: --no-slack, --slack-interval
+When shipping any feature (adapter, fix, or enhancement):
 
-### slack_adapter.py design
-```
-Standalone process, same pattern as irc_adapter.py:
-1. Load Slack bot token from ~/.grok/creds/slack_bot_token
-2. Poll Slack DM channel for new messages (conversations.history)
-3. Parse target agent from message text
-4. Write to hub inbox via adapter_api.write_message()
-5. Poll hub outbox via adapter_api.poll_responses("slack")
-6. Post responses to Slack DM via chat.postMessage
-```
+1. **Code** -- implementation + tests passing
+2. **requirements.txt** -- any new dependencies added with version constraints
+3. **ADAPTER_CATALOG.md** -- updated if adapter status changed
+4. **agents.json** -- updated if new adapter needs config entries
+5. **ASDAAAS_AGENT_INSTRUCTIONS.md** -- updated if agents need new operational knowledge
+6. **sync_to_public.sh** -- new files added to mappings
+7. **Run sync** -- `bash sync_to_public.sh` to push to public repo
+8. **Commit both repos** -- private (mikeyv-infra) and public (agentabide)
+9. **Lab notebook** -- document what shipped, commit hashes, test count
 
-### Risk assessment
-- LOW risk to build the adapter (it's additive)
-- MEDIUM risk to remove Slack from the hub (breaks working system before hackathon)
-- Recommendation: Build slack_adapter.py and test alongside hub's built-in Slack.
-  Once verified, add --slack-adapter flag to hub that disables built-in Slack.
-  Do NOT remove built-in Slack until after hackathon (March 28).
+## adapter_api.py Quick Reference
+
+| Function | Purpose |
+|----------|---------|
+| `write_to_adapter_inbox(adapter, to, text, sender, meta)` | Write inbound message |
+| `poll_adapter_outbox(adapter, agent)` | Read agent responses |
+| `ensure_dirs(adapter)` | Create directories at startup |
+| `register_adapter(name, capabilities, config)` | Register with ASDAAAS |
+| `update_heartbeat(adapter)` | Signal adapter is alive |
 
 ## Writing a New Adapter
 
-1. Copy irc_adapter.py as a template
-2. Replace transport-specific code (IRC socket -> your transport)
-3. Use adapter_api.write_message() for inbound, adapter_api.poll_responses() for outbound
-4. Add agent routing logic (parse target from message text)
-5. Run as standalone process: setsid nohup python3 your_adapter.py > log 2>&1
-6. Hub picks it up automatically via inbox polling -- no hub changes needed
-
-## Collision Safety
-- mkstemp() gives kernel-guaranteed unique filenames
-- os.rename() is atomic on Linux
-- Hub ignores .tmp files (only reads .json)
-- Benchmarked: 109 microseconds per write+rename, 0 collisions in 1500-msg test
+1. Copy `control_adapter_template.py` as starting point
+2. Replace transport-specific code
+3. Add to `requirements.txt` if external deps needed
+4. Write tests
+5. Create launch script
+6. Add to `ADAPTER_CATALOG.md`
+7. Add to `sync_to_public.sh` mappings
+8. Run full test suite: `pytest tests/ -q`
