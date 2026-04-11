@@ -572,9 +572,9 @@ def read_awareness(agent_name):
         with open(awareness_file) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        # Default awareness: watch IRC direct adapter + legacy universal inbox
+        # Default awareness: watch TUI and IRC direct adapters
         return {
-            "direct_attach": ["irc"],
+            "direct_attach": ["tui", "irc"],
             "control_watch": {},
             "notify_watch": [],
             "accept_from": ["*"],
@@ -1557,6 +1557,34 @@ async def main(agent_name, session_id=None, agent_cwd=None):
     ADAPTERS_DIR.mkdir(parents=True, exist_ok=True)
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     
+    # Auto-generate starter config files if they don't exist
+    awareness_file = a_dir / "awareness.json"
+    if not awareness_file.exists():
+        starter_awareness = {
+            "direct_attach": ["tui", "irc"],
+            "control_watch": {},
+            "notify_watch": [],
+            "accept_from": ["*"],
+            "default_doorbell": True,
+            "doorbell_ttl": {"context": 1, "session": 2, "default": 3},
+        }
+        with open(awareness_file, "w") as f:
+            json.dump(starter_awareness, f, indent=2)
+        print(f"[asdaaas] Created starter awareness.json for {agent_name}")
+
+    gaze_file = a_dir / "gaze.json"
+    if not gaze_file.exists():
+        starter_gaze = {
+            "speech": {"target": "tui", "params": {}},
+            "thoughts": None,
+        }
+        with open(gaze_file, "w") as f:
+            json.dump(starter_gaze, f, indent=2)
+        print(f"[asdaaas] Created starter gaze.json for {agent_name}")
+
+    commands_dir = a_dir / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+
     # Register in running_agents.json so adapters can find us
     _register_running_agent(agent_name, agent_cwd)
 

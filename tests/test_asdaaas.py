@@ -70,7 +70,7 @@ class TestReadAwareness:
 
     def test_missing_file_defaults(self, hub_dir):
         awareness = asdaaas.read_awareness("NonexistentAgent")
-        assert awareness["direct_attach"] == ["irc"]
+        assert awareness["direct_attach"] == ["tui", "irc"]
         assert awareness["control_watch"] == {}
         assert awareness["notify_watch"] == []
         assert awareness["accept_from"] == ["*"]
@@ -80,7 +80,7 @@ class TestReadAwareness:
         with open(awareness_file, "w") as f:
             f.write("broken{{{")
         awareness = asdaaas.read_awareness("Trip")
-        assert awareness["direct_attach"] == ["irc"]
+        assert awareness["direct_attach"] == ["tui", "irc"]
 
 
 # ============================================================================
