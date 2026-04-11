@@ -149,11 +149,14 @@ fi
 echo ""
 echo "=== Done ==="
 
-# Show any remaining processes
+# Show any remaining processes and offer to kill them
 remaining=$(pgrep -f "asdaaas.py --agent" 2>/dev/null | wc -l)
 if [ "$remaining" -gt 0 ]; then
     echo "WARNING: $remaining asdaaas process(es) still running"
     pgrep -af "asdaaas.py --agent" 2>/dev/null
+    echo ""
+    echo "These may be agents not listed in agents.json."
+    echo "To force-kill all asdaaas processes: pkill -f 'asdaaas.py --agent'"
 else
     echo "All asdaaas processes stopped"
 fi

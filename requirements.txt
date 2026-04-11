@@ -1,0 +1,13 @@
+# ASDAAAS dependencies
+#
+# Core (asdaaas.py, adapters, localmail): no external dependencies (stdlib only)
+#
+# TUI (asdaaas_tui.py):
+textual>=0.40.0
+rich>=13.0.0
+#
+# Dashboard (projects_dashboard.py):
+# textual (already listed above)
+#
+# Tests:
+pytest>=7.0.0
