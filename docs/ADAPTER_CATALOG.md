@@ -3,7 +3,7 @@
 Reference for all adapters in the MikeyV system. Lives alongside ASDAAAS_DESIGN.md.
 See that document for the three adapter types (direct, notify, control) and the contracts that govern them.
 
-Documented: 2026-03-26 by MikeyV-Sr. Updated: 2026-04-06.
+Documented: 2026-03-26 by MikeyV-Sr. Updated: 2026-04-11.
 
 ---
 
@@ -101,9 +101,33 @@ Same pattern as IRC but for Slack workspaces. Adapter holds Slack bot token, con
 
 ---
 
+### TUI (direct)
+
+**Status:** BUILT AND RUNNING. Built by Trip. 912 lines (adapter) + 2564 lines (TUI app).
+**Files:** `live/comms/tui_adapter.py`, `live/comms/asdaaas_tui.py`
+
+Interactive terminal UI for human-agent interaction. The TUI adapter reads agent output from `updates.jsonl` (append-only, crash-safe) and writes user input to the agent's TUI adapter inbox. The TUI app (`asdaaas_tui.py`) provides a Textual-based interface with markdown rendering, syntax highlighting, collapsible sections, and multi-agent support.
+
+**Capabilities:**
+- Real-time agent output display with rich formatting
+- User input routed to agent via adapter inbox
+- Multi-agent switching (view/interact with different agents)
+- Tail mode (`--tail N`) for catching up on recent output
+- Replay mode (`--replay`) for reviewing full session
+- Health monitoring and context display
+
+**Dependencies:** `textual`, `textual-speedups`, `rich` (see `requirements.txt`)
+
+**Gaze command:**
+```json
+{"action": "gaze", "adapter": "tui"}
+```
+
+---
+
 ### Mesh (direct)
 
-**Status:** DESIGNED, NOT BUILT.
+**Status:** DESIGNED, NOT BUILT. May be unnecessary -- IRC PMs already provide agent-to-agent messaging, and localmail handles async communication.
 
 Agent-to-agent real-time communication without going through IRC. Direct adapter — ASDAAAS pipes speech between agents. The agent changes gaze to `{"target": "mesh", "params": {"agent": "Jr"}}` and speaks naturally.
 

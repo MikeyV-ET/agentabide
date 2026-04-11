@@ -1,6 +1,6 @@
 # ASDAAAS Test Coverage Overview
 
-**Last updated:** 2026-04-06
+**Last updated:** 2026-04-11
 **Total tests:** 534 (0 regressions)
 **Production code:** ~10,274 lines across 17 files in `live/comms/`
 **Test code:** ~6,685 lines across 9 test files + conftest + mock_agent
@@ -22,6 +22,11 @@
 | `context_adapter.py` | 339 | `test_phases_4_7.py` | 93* | Context threshold tracking |
 | `session_adapter.py` | 323 | `test_phases_4_7.py` | shared | Compact/status doorbells |
 | `heartbeat_adapter.py` | 344 | `test_phases_4_7.py` | shared | Idle tracking and nudges |
+| `asdaaas_config.py` | 145 | -- | 0 | Config loader (tested implicitly via all other tests) |
+| `bug_report.py` | 158 | -- | 0 | Bug filing utility |
+| `behavioral_test.py` | 382 | -- | 0 | Fire-drill test framework |
+| `tui_adapter.py` | 912 | `test_tui.py` | * | TUI backend (async tests need pytest-asyncio) |
+| `asdaaas_tui.py` | 2,564 | `test_tui.py` | * | TUI app (Textual) |
 | `slack_adapter.py` | 695 | -- | 0 | **No tests** |
 | `irc_bridge.py` | 252 | -- | 0 | **No tests** |
 | `reliable_send.py` | 292 | -- | 0 | **No tests** |
