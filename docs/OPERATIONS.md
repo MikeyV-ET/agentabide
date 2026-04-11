@@ -1,405 +1,202 @@
-# MikeyV Operations Guide
+# ASDAAAS Operations Guide
 
-How to start, stop, restart, and monitor the MikeyV agent infrastructure.
+How to start, stop, restart, and monitor the ASDAAAS agent infrastructure.
 
 ## Architecture Overview
 
 ```
-                    Eric's terminals
-                    ├── pts/0: Sr TUI
-                    ├── pts/6: Jr TUI
-                    └── pts/8: (spare)
-                    
 miniircd (IRC server, port 6667)
-  └── IRC adapter (5 nicks: MikeyV-Sr/Jr/Trip/Q/Cinco)
-        ├── reads from: adapters/irc/outbox/<agent>/
-        └── writes to:  adapters/irc/inbox/<agent>/
+  └── IRC adapter (one nick per agent)
+        ├── reads from: agents/<Name>/asdaaas/adapters/irc/outbox/
+        └── writes to:  agents/<Name>/asdaaas/adapters/irc/inbox/
 
-asdaaas (one per stdio agent)
-  ├── Cinco: session 019d1ec0, cwd MikeyV-Cinco
-  ├── Trip:  session 019d1ec1, cwd MikeyV-Trip
-  └── Q:     session 019d1ec2, cwd MikeyV-Q
-        ├── reads from: adapters/irc/inbox/<agent>/ + legacy inbox/
-        ├── writes to:  adapters/irc/outbox/<agent>/
-        └── delivers:   doorbells from asdaaas_doorbells/<agent>/
+asdaaas (one per agent)
+  ├── reads from: agents/<Name>/asdaaas/adapters/*/inbox/
+  ├── writes to:  agents/<Name>/asdaaas/adapters/*/outbox/
+  └── delivers:   agents/<Name>/asdaaas/doorbells/
 
 localmail (async agent-to-agent messaging)
-  ├── watches: adapters/localmail/inbox/<agent>/
-  └── rings:   asdaaas_doorbells/<agent>/ (for asdaaas agents)
+  ├── watches: agents/<Name>/asdaaas/adapters/localmail/inbox/
+  └── rings:   agents/<Name>/asdaaas/doorbells/
+
+TUI adapter (interactive terminal)
+  ├── reads from: agents/<Name>/asdaaas/adapters/tui/outbox/
+  └── writes to:  agents/<Name>/asdaaas/adapters/tui/inbox/
 ```
+
+## Configuration
+
+All components read from `agents.json` (in the ops/ directory) or `config.json`
+(in the core/ directory). Edit these files to set paths and agent definitions.
+See `config.json.template` for the schema.
 
 ## Startup Order
 
 Start in this order. Later components depend on earlier ones.
 
-### 1. miniircd (IRC server)
+### 1. IRC server + adapter
 
 ```bash
-setsid nohup python3 ~/.local/bin/miniircd \
-  --listen 127.0.0.1 --ports 6667 \
-  --channel-log-dir ~/.grok/irc_logs --verbose \
-  > /tmp/miniircd.log 2>&1 &
+bash ops/launch_irc_server.sh    # starts miniircd on port 6667
+bash ops/launch_irc_adapter.sh   # connects all agents from agents.json
 ```
 
-**Check:** `ss -tlnp | grep 6667`
+**Check:** `ss -tlnp | grep 6667` and `tail -5 /tmp/irc_adapter.log`
 
-### 2. IRC adapter
+### 2. ASDAAAS agents
 
 ```bash
-setsid nohup python3 -u ~/projects/mikeyv-infra/live/comms/irc_adapter.py \
-  --channel '#standup' \
-  > /tmp/irc_adapter.log 2>&1 &
+bash ops/launch_asdaaas.sh              # launch all agents from agents.json
+bash ops/launch_asdaaas.sh AgentOne     # launch specific agent
 ```
 
-**Check:** `tail -5 /tmp/irc_adapter.log` — should show 5 agents connected.
+**Check:** `tail -5 /tmp/asdaaas_agentone.log`
 
-**Options:**
-- `--agents Sr,Jr,Trip` — subset of agents (default: all 5)
-- `--host 127.0.0.1` — IRC server host
-- `--port 6667` — IRC server port
-
-### 3. asdaaas agents (Cinco, Trip, Q)
+### 3. Supporting adapters
 
 ```bash
-bash ~/projects/mikeyv-infra/live/comms/launch_asdaaas.sh
+bash ops/launch_localmail.sh     # agent-to-agent messaging
+bash ops/launch_heartbeat.sh     # idle nudges
+bash ops/launch_remind.sh        # scheduled doorbells
 ```
 
-Or individually:
-```bash
-ASDAAAS=~/projects/mikeyv-infra/live/comms/asdaaas.py
+Context and session adapters run inside asdaaas (no separate process needed).
 
-setsid nohup python3 -u "$ASDAAAS" \
-  --agent Cinco \
-  --session 019d1ec0-5dd0-7e32-8eec-2577d8c541dd \
-  --cwd /home/eric/MikeyV-Cinco \
-  > /tmp/asdaaas_cinco.log 2>&1 &
-
-setsid nohup python3 -u "$ASDAAAS" \
-  --agent Trip \
-  --session 019d1ec1-0748-7b22-b4c2-6a6095a28b74 \
-  --cwd /home/eric/MikeyV-Trip \
-  > /tmp/asdaaas_trip.log 2>&1 &
-
-setsid nohup python3 -u "$ASDAAAS" \
-  --agent Q \
-  --session 019d1ec2-2e7b-7723-a6a5-ec9e9d719da6 \
-  --cwd /home/eric/MikeyV-Q \
-  > /tmp/asdaaas_q.log 2>&1 &
-```
-
-**Check:** `tail -5 /tmp/asdaaas_trip.log` — should show "Ready. Polling for 'Trip'..."
-
-### 4. Localmail adapter
+### 4. TUI (interactive terminal)
 
 ```bash
-setsid nohup python3 -u ~/projects/mikeyv-infra/live/comms/localmail.py \
-  > /tmp/localmail.log 2>&1 &
+python3 adapters/asdaaas_tui.py --agent AgentOne --agents-home /path/to/agents
 ```
 
-**Check:** `tail -3 /tmp/localmail.log` — should show "Starting localmail adapter" and agent list.
-
-**Options:**
-- `--agents Sr,Jr,Trip` — subset of agents (default: all 5)
-- `--poll-interval 1.0` — how often to check inboxes (seconds)
-
-### 5. Context adapter (Phase 6.1)
-
-```bash
-setsid nohup python3 -u ~/projects/mikeyv-infra/live/comms/context_adapter.py \
-  > /tmp/context_adapter.log 2>&1 &
-```
-
-**Check:** `tail -3 /tmp/context_adapter.log` — should show "Context adapter starting" and threshold list.
-
-Watches agent health files and sends doorbell notifications at context threshold crossings (45%, 65%, 80%, 88%).
-
-**Options:**
-- `--agents Trip,Q,Cinco` — subset of agents (default: all 5)
-- `--poll-interval 5` — how often to check health files (seconds, default 5)
-
-### 6. Session adapter (Phase 6.2)
-
-```bash
-setsid nohup python3 -u ~/projects/mikeyv-infra/live/comms/session_adapter.py \
-  > /tmp/session_adapter.log 2>&1 &
-```
-
-**Check:** `tail -3 /tmp/session_adapter.log` — should show "Session adapter starting".
-
-Accepts `compact` and `status` commands from agents via inbox. Executes through asdaaas command file and delivers results as doorbells.
-
-**Options:**
-- `--agents Trip,Q,Cinco` — subset of agents (default: all 5)
-- `--poll-interval 2` — how often to check inbox (seconds, default 2)
-
-### 7. Heartbeat adapter (Phase 6.3)
-
-```bash
-setsid nohup python3 -u ~/projects/mikeyv-infra/live/comms/heartbeat_adapter.py \
-  > /tmp/heartbeat_adapter.log 2>&1 &
-```
-
-**Check:** `tail -3 /tmp/heartbeat_adapter.log` — should show "Heartbeat adapter starting".
-
-Sends idle nudge doorbells when agents have been inactive for too long. Addresses the "spontaneous initiative" problem.
-
-**Options:**
-- `--agents Trip,Q,Cinco` — subset of agents (default: all 5)
-- `--idle-threshold 900` — seconds before first nudge (default 900 = 15 min)
-- `--nudge-interval 600` — seconds between subsequent nudges (default 600 = 10 min)
-- `--poll-interval 30` — how often to check health files (seconds, default 30)
-
-### 8. TUI agents (Sr, Jr)
-
-```bash
-# Sr (pts/0)
-grok   # from /home/eric/MikeyV-Sr
-
-# Jr (pts/6)
-grok   # from /home/eric/MikeyV-Jr
-```
+**Dependencies:** `pip install -r requirements.txt` (textual, rich)
 
 ## Shutdown
 
 ### Stop everything
 ```bash
-# Find and kill all components
-pkill -f miniircd
-pkill -f irc_adapter.py
-pkill -f asdaaas.py
-pkill -f localmail.py
-pkill -f "grok agent stdio"
+bash ops/stop_asdaaas.sh           # graceful shutdown of all agents + adapters
 ```
 
-### Stop individual components
+### Stop specific agents
 ```bash
-# Find PID
-ps aux | grep -E 'asdaaas|irc_adapter|localmail|miniircd' | grep -v grep
-
-# Kill by PID
-kill <pid>
+bash ops/stop_asdaaas.sh AgentOne AgentTwo
 ```
 
-### Stop one asdaaas agent
+### Force stop (skip graceful shutdown)
 ```bash
-# Find the specific agent
-ps aux | grep "asdaaas.*--agent Trip" | grep -v grep
-kill <pid>
-# This also kills the child grok agent stdio process
+bash ops/stop_asdaaas.sh --force
 ```
 
 ## Restart Procedures
 
-### Restart IRC adapter (pick up code changes)
+### Restart all agents (pick up code changes)
 ```bash
-pkill -f irc_adapter.py
-sleep 1
-setsid nohup python3 -u ~/projects/mikeyv-infra/live/comms/irc_adapter.py \
-  --channel '#standup' > /tmp/irc_adapter.log 2>&1 &
+bash ops/stop_asdaaas.sh && sleep 2 && bash ops/launch_asdaaas.sh
 ```
 
-### Restart all asdaaas agents (pick up code changes)
+### Restart one agent
 ```bash
-pkill -f asdaaas.py
-sleep 2  # let child processes die
-bash ~/projects/mikeyv-infra/live/comms/launch_asdaaas.sh
-```
-
-### Restart one asdaaas agent
-```bash
-# Find and kill
-ps aux | grep "asdaaas.*--agent Q" | grep -v grep | awk '{print $2}' | xargs kill
-sleep 2
-
-# Relaunch
-ASDAAAS=~/projects/mikeyv-infra/live/comms/asdaaas.py
-setsid nohup python3 -u "$ASDAAAS" \
-  --agent Q \
-  --session 019d1ec2-2e7b-7723-a6a5-ec9e9d719da6 \
-  --cwd /home/eric/MikeyV-Q \
-  > /tmp/asdaaas_q.log 2>&1 &
+bash ops/restart_agent.sh AgentOne
 ```
 
 ## Monitoring
 
 ### Dashboard
 ```bash
-python3 ~/projects/mikeyv-infra/live/dashboard/mikeyv_dashboard.py
+python3 dashboard/projects_dashboard.py
 ```
 
 ### Health files
 ```bash
 # Agent health (asdaaas writes after each turn)
-cat ~/agents/Trip/asdaaas/health.json | python3 -m json.tool
-
-# Adapter registration
-cat ~/asdaaas/adapters/localmail.json | python3 -m json.tool
+cat agents/<Name>/asdaaas/health.json | python3 -m json.tool
 ```
 
 ### Logs
+
+All logs go to `/tmp/` by default (configurable in agents.json):
+
 | Component | Log file |
 |-----------|----------|
 | miniircd | `/tmp/miniircd.log` |
 | IRC adapter | `/tmp/irc_adapter.log` |
-| asdaaas Cinco | `/tmp/asdaaas_cinco.log` |
-| asdaaas Trip | `/tmp/asdaaas_trip.log` |
-| asdaaas Q | `/tmp/asdaaas_q.log` |
-| Context adapter | `/tmp/context_adapter.log` |
-| Session adapter | `/tmp/session_adapter.log` |
+| asdaaas \<agent\> | `/tmp/asdaaas_<agent>.log` |
 | Heartbeat adapter | `/tmp/heartbeat_adapter.log` |
 | Localmail | `/tmp/localmail.log` |
-| IRC channel logs | `~/.grok/irc_logs/` |
-
-### Profiling
-```bash
-# Latest timing for an agent
-cat ~/agents/Trip/asdaaas/profile/Trip_latest.json | python3 -m json.tool
-
-# Full timing log
-tail -5 ~/agents/Trip/asdaaas/profile/Trip.jsonl
-```
 
 ### Queue depths
 ```bash
 # Check for stuck messages
-ls ~/agents/Trip/asdaaas/adapters/irc/inbox/ | wc -l
-ls ~/agents/Trip/asdaaas/adapters/irc/outbox/ | wc -l
-ls ~/agents/Q/asdaaas/adapters/localmail/inbox/ | wc -l
-ls ~/agents/Q/asdaaas/doorbells/ | wc -l
+ls agents/<Name>/asdaaas/adapters/irc/inbox/ | wc -l
+ls agents/<Name>/asdaaas/doorbells/ | wc -l
 ```
 
 ## Sending Localmail
 
-### From a script or command line
 ```python
-import sys
-sys.path.insert(0, '/home/eric/projects/mikeyv-infra/live/comms')
-from localmail import send_mail, read_mail
-
-# Send
-send_mail('Jr', 'Q', 'Status update on Meet adapter please')
-
-# Read (for TUI agents who poll manually)
-for msg in read_mail('Jr'):
-    print(f'{msg["from"]}: {msg["text"]}')
-```
-
-### One-liner
-```bash
-python3 -c "
-import sys; sys.path.insert(0, '/home/eric/projects/mikeyv-infra/live/comms')
+import sys; sys.path.insert(0, '/path/to/asdaaas/core')
 from localmail import send_mail
-send_mail('Jr', 'Q', 'Status update please')
-"
+send_mail('AgentOne', 'AgentTwo', 'Status update please')
 ```
 
-## Setting Agent Gaze
+## Gaze and Awareness
 
-Agents' speech and thoughts are routed independently via gaze files. Uses adapter-agnostic `room` key.
+Agents control their own gaze and awareness via commands (do NOT hand-edit JSON files):
 
-```bash
-# Set Trip's gaze: speech to #standup, thoughts to #trip-thoughts
-cat > ~/agents/Trip/asdaaas/gaze.json << 'EOF'
-{
-  "speech": {"target": "irc", "params": {"room": "#standup"}},
-  "thoughts": {"target": "irc", "params": {"room": "#trip-thoughts"}}
-}
-EOF
-
-# Suppress thoughts (demo mode)
-cat > ~/agents/Trip/asdaaas/gaze.json << 'EOF'
-{
-  "speech": {"target": "irc", "params": {"room": "#standup"}},
-  "thoughts": null
-}
-EOF
+```json
+{"action": "gaze", "adapter": "irc", "room": "#general"}
+{"action": "gaze", "adapter": "irc", "pm": "username"}
+{"action": "gaze", "adapter": "tui"}
+{"action": "awareness", "add": "#channel", "mode": "doorbell"}
 ```
 
-## Setting Agent Awareness
-
-Controls which adapter inboxes asdaaas watches, background channel policies, heartbeat timing, and context thresholds.
-
-```bash
-cat > ~/agents/Trip/asdaaas/awareness.json << 'EOF'
-{
-  "direct_attach": ["irc"],
-  "background_channels": {
-    "#standup": "doorbell"
-  },
-  "background_default": "pending",
-  "heartbeat": {
-    "idle_threshold": 900,
-    "nudge_interval": 600
-  },
-  "context_thresholds": [45, 65, 80, 88]
-}
-EOF
-```
-
-- `background_channels`: per-room policy for messages not matching gaze (`doorbell`/`pending`/`drop`)
-- `heartbeat.idle_threshold`: seconds before first idle nudge (default 900)
-- `heartbeat.nudge_interval`: seconds between subsequent nudges (default 600)
-- `context_thresholds`: percentages at which context doorbells fire (default [45, 65, 80, 88])
-
-All fields optional. Adapters fall back to defaults when not set. Changes take effect on next poll cycle (no restart needed).
-
-## Context Status Tag
-
-Every prompt injected into an asdaaas agent includes a context status tag:
-
-```
-[Context left 89k | compaction available]
-```
-
-- Shows tokens remaining before compaction (85% of 200k = 170k usable)
-- Compaction status: `just compacted` / `compacted 1 turn ago` / `compaction available`
-- Always on, ~7 tokens per prompt
+See `ASDAAAS_AGENT_INSTRUCTIONS.md` for full command reference.
 
 ## Agent Self-Compaction
 
-Agents can request their own compaction by writing a command file:
+Agents request compaction via command queue:
 
-```bash
-echo '{"action": "compact"}' > ~/agents/Trip/asdaaas/commands.json
+```json
+{"action": "compact"}
 ```
 
-Flow: agent writes command -> asdaaas issues confirmation doorbell with random `/tmp` file path -> agent touches file -> asdaaas executes `/compact` on next turn.
-
-Safety: 2-turn cooldown after any compaction. Random filename prevents stale triggers. Confirmation expires after one turn.
+Flow: agent writes command -> asdaaas issues confirmation doorbell -> agent touches confirm file -> compaction executes. Agent gets 3 turns to confirm.
 
 ## Directory Structure
 
 ```
-~/asdaaas/
-├── agents/
-│   └── <AgentName>/
-│       ├── gaze.json              ← where agent speech/thoughts go
-│       ├── awareness.json         ← which adapters agent watches
-│       ├── health.json            ← asdaaas health heartbeat
-│       ├── commands.json          ← commands for asdaaas pipe (e.g., /compact)
-│       ├── attention/             ← attention declarations (expect_response)
-│       ├── doorbells/             ← doorbell notifications for agent
-│       └── profile/               ← per-message timing data
-├── adapters/
-│   ├── irc/
-│   │   ├── inbox/<agent>/         ← IRC adapter writes inbound messages
-│   │   └── outbox/<agent>/        ← asdaaas writes agent responses
-│   └── localmail/
-│       ├── inbox/<agent>/         ← agents write messages to each other
-│       └── outbox/<agent>/        ← (unused for notify type)
-├── inbox/                         ← legacy universal inbox
-├── outbox/                        ← legacy outbox
-└── payloads/                      ← reference passing payload files
+agents/
+└── <AgentName>/
+    ├── AGENTS.md                  ← agent identity
+    ├── lab_notebook.md            ← append-only record
+    ├── notes_to_self.md           ← mutable working memory
+    └── asdaaas/
+        ├── gaze.json              ← where speech/thoughts go
+        ├── awareness.json         ← what reaches the agent
+        ├── health.json            ← vital signs (written by asdaaas)
+        ├── commands/              ← agent writes commands here
+        ├── doorbells/             ← pending notifications
+        ├── attention/             ← attention declarations
+        ├── profile/               ← per-turn timing data
+        └── adapters/
+            ├── irc/{inbox,outbox}
+            ├── tui/{inbox,outbox}
+            ├── localmail/{inbox,outbox}
+            └── remind/{inbox,outbox}
+
+asdaaas/                           ← shared system directory
+├── running_agents.json            ← agent name -> home path
+└── adapters/                      ← adapter registrations
 ```
 
 ## Troubleshooting
 
 ### Agent not responding to IRC messages
-1. Check asdaaas log: `tail -20 /tmp/asdaaas_trip.log`
+1. Check asdaaas log: `tail -20 /tmp/asdaaas_<agent>.log`
 2. Check IRC adapter log: `tail -20 /tmp/irc_adapter.log`
-3. Check inbox queue: `ls ~/agents/Trip/asdaaas/adapters/irc/inbox/`
-4. Check outbox queue: `ls ~/agents/Trip/asdaaas/adapters/irc/outbox/`
-5. Check health: `cat ~/agents/Trip/asdaaas/health.json`
+3. Check inbox queue: `ls agents/<Name>/asdaaas/adapters/irc/inbox/`
+4. Check outbox queue: `ls agents/<Name>/asdaaas/adapters/irc/outbox/`
+5. Check health: `cat agents/<Name>/asdaaas/health.json`
 
 ### Agent responses are "one behind" (desync)
 
@@ -451,18 +248,9 @@ to the outbox rather than silently dropped. Fragments are logged and discarded.
 2. CWD must match session creation path (URL-encoded)
 3. If session won't load, create new session (omit `--session` flag)
 
-## Session IDs
+## Version Check
 
-| Agent | Session ID | CWD |
-|-------|-----------|-----|
-| Sr | `019d0870-0251-78b2-8764-3d8e99a5ddda` | `/home/eric/agents/Sr` |
-| Jr | `019d0a24-d869-7400-b111-a373abf4fe2d` | `/home/eric/agents/Jr` |
-| Cinco | `019d1ec0-5dd0-7e32-8eec-2577d8c541dd` | `/home/eric/agents/Cinco` |
-| Trip | `019d1ec1-0748-7b22-b4c2-6a6095a28b74` | `/home/eric/agents/Trip` |
-| Q | `019d1ec2-2e7b-7723-a6a5-ec9e9d719da6` | `/home/eric/agents/Q` |
-
-## Binary
-
-Current: `0.1.159-alpha.2` (build `4d3ca1c02`)
-Path: `~/.grok/bin/grok` (symlinked)
-Check version: `grok --version`
+```bash
+bash ops/asdaaas_version.sh   # shows RUNNING vs HEAD commit for each agent
+grok --version                # grok binary version
+```
