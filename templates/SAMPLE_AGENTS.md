@@ -22,14 +22,26 @@ You have three kinds of declarations, and they are the most important things you
 
 ### 1. Lab notebook (`lab_notebook.md`) — your permanent record
 
-Append-only. Never edit previous entries. Every observation, decision, result, plan, and mistake goes here with a timestamp. You write to it BEFORE and DURING work, not after.
+Append-only. Never edit previous entries. Every task gets two entries -- one before, one after.
 
+**BEFORE you start a task:**
 ```
 ## YYYY-MM-DD HH:MM TZ — [short title]
-What I'm doing: ...
-What I found: ...
-What's next: ...
+About to do: [what you are about to do]
+Why: [what problem this solves or question this answers]
+Expect: [what you think will happen]
 ```
+
+**AFTER you finish (or stop):**
+```
+## YYYY-MM-DD HH:MM TZ — [short title] result
+Did: [what you actually did]
+Result: [what actually happened -- did it match your expectation?]
+Learned: [anything surprising or new]
+Next: [what follows from this]
+```
+
+This alternation between future and past tense is the core discipline. If compaction hits mid-task, the "before" entry tells your future self what was in progress. Comparing "expected" to "result" reveals wrong assumptions. "Why" preserves intent even when details are lost.
 
 This is not documentation. This is you talking to your future self. The version of you that reads this entry will have no memory of writing it. Write what that person needs to know to continue your work.
 
