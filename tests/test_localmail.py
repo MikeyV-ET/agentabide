@@ -185,25 +185,28 @@ class TestGetAsdaaasAgents:
         assert "Trip" in agents
         assert "Q" in agents
 
-    def test_excludes_stale_agents(self, hub_dir, write_health):
+    def test_includes_idle_agents(self, hub_dir, write_health):
+        """Idle agents with stale health files are still asdaaas agents."""
         write_health("Trip")
-        # Make Trip's health file old
         health_file = hub_dir.parent / "agents" / "Trip" / "asdaaas" / "health.json"
         old_time = time.time() - 7200  # 2 hours ago
         os.utime(health_file, (old_time, old_time))
         agents = localmail.get_asdaaas_agents()
-        assert "Trip" not in agents
+        assert "Trip" in agents  # still detected via doorbells dir
 
-    def test_excludes_error_status(self, hub_dir):
-        health_file = hub_dir.parent / "agents" / "Trip" / "asdaaas" / "health.json"
-        with open(health_file, "w") as f:
-            json.dump({"agent": "Trip", "status": "error"}, f)
+    def test_detects_by_directory_structure(self, hub_dir):
+        """Any agent with asdaaas/doorbells/ is an asdaaas agent."""
         agents = localmail.get_asdaaas_agents()
-        assert "Trip" not in agents
+        # conftest creates doorbells dir for all 5 agents
+        assert "Sr" in agents
+        assert "Trip" in agents
 
-    def test_empty_health_dir(self, hub_dir):
+    def test_excludes_non_asdaaas_dirs(self, hub_dir):
+        """Directories without asdaaas/doorbells/ are not detected."""
+        # Create a directory that looks like an agent but has no asdaaas
+        (hub_dir.parent / "agents" / "NotAnAgent").mkdir(parents=True, exist_ok=True)
         agents = localmail.get_asdaaas_agents()
-        assert agents == set()
+        assert "NotAnAgent" not in agents
 
 
 class TestRoundTrip:
@@ -256,14 +259,19 @@ class TestRoundTrip:
         assert "Jr" in bell["text"]
         assert "Check this out" in bell["text"]
 
-    def test_tui_agent_message_stays(self, hub_dir):
-        """TUI agents (no health file) should have messages stay in inbox."""
-        localmail.send_mail("Q", "Jr", "Response to your question")
+    def test_non_asdaaas_agent_message_stays(self, hub_dir):
+        """Agents without asdaaas/doorbells/ should have messages stay in inbox."""
+        # Create a non-asdaaas agent
+        non_asdaaas = hub_dir.parent / "agents" / "Legacy"
+        (non_asdaaas / "asdaaas" / "adapters" / "localmail" / "inbox").mkdir(parents=True, exist_ok=True)
+        # No doorbells dir = not detected as asdaaas agent
+        
+        localmail.send_mail("Q", "Legacy", "Response to your question")
         
         asdaaas_agents = localmail.get_asdaaas_agents()
-        assert "Jr" not in asdaaas_agents
+        assert "Legacy" not in asdaaas_agents
         
         # Message should still be readable
-        messages = localmail.read_mail("Jr")
+        messages = localmail.read_mail("Legacy")
         assert len(messages) == 1
         assert messages[0]["text"] == "Response to your question"
