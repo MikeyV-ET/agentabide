@@ -1926,32 +1926,32 @@ class TestContextLeftTag:
     def test_basic_format(self):
         # 170k usable - 111k used = 59k left
         tag = asdaaas.context_left_tag(111000, 200000)
-        assert tag == "\n[Context left 59k]"
+        assert tag == "\n[Context left 59k till autocompaction]"
 
     def test_large_remaining(self):
         # 170k usable - 10k used = 160k left
         tag = asdaaas.context_left_tag(10000, 200000)
-        assert tag == "\n[Context left 160k]"
+        assert tag == "\n[Context left 160k till autocompaction]"
 
     def test_small_remaining(self):
         # 170k usable - 165k used = 5k left
         tag = asdaaas.context_left_tag(165000, 200000)
-        assert tag == "\n[Context left 5.0k]"
+        assert tag == "\n[Context left 5.0k till autocompaction]"
 
     def test_very_small_remaining(self):
         # 170k usable - 169.5k used = 0.5k left
         tag = asdaaas.context_left_tag(169500, 200000)
-        assert tag == "\n[Context left 0.5k]"
+        assert tag == "\n[Context left 0.5k till autocompaction]"
 
     def test_zero_remaining(self):
         # At compaction threshold exactly
         tag = asdaaas.context_left_tag(170000, 200000)
-        assert tag == "\n[Context left 0.0k]"
+        assert tag == "\n[Context left 0.0k till autocompaction]"
 
     def test_over_compaction_threshold(self):
         # Past compaction threshold -- 0 left
         tag = asdaaas.context_left_tag(180000, 200000)
-        assert tag == "\n[Context left 0.0k]"
+        assert tag == "\n[Context left 0.0k till autocompaction]"
 
     def test_zero_context_window(self):
         tag = asdaaas.context_left_tag(100000, 0)
@@ -1964,12 +1964,12 @@ class TestContextLeftTag:
     def test_boundary_10k(self):
         # 170k - 160k = 10k left -- integer format
         tag = asdaaas.context_left_tag(160000, 200000)
-        assert tag == "\n[Context left 10k]"
+        assert tag == "\n[Context left 10k till autocompaction]"
 
     def test_just_under_10k(self):
         # 170k - 160.5k = 9.5k left -- decimal format
         tag = asdaaas.context_left_tag(160500, 200000)
-        assert tag == "\n[Context left 9.5k]"
+        assert tag == "\n[Context left 9.5k till autocompaction]"
 
     # ---- Compaction status in tag ----
 
@@ -2015,22 +2015,22 @@ class TestContextLeftTag:
     def test_gaze_irc_pm(self):
         gaze = {"speech": {"target": "irc", "params": {"room": "pm:eric"}}}
         tag = asdaaas.context_left_tag(100000, 200000, turns_since_compaction=2, gaze=gaze)
-        assert tag == "\n[Context left 70k | compaction available | irc/pm:eric]"
+        assert tag == "\n[Context left 70k till autocompaction | compaction available | irc/pm:eric]"
 
     def test_gaze_irc_channel(self):
         gaze = {"speech": {"target": "irc", "params": {"room": "#standup"}}}
         tag = asdaaas.context_left_tag(100000, 200000, turns_since_compaction=2, gaze=gaze)
-        assert tag == "\n[Context left 70k | compaction available | irc/#standup]"
+        assert tag == "\n[Context left 70k till autocompaction | compaction available | irc/#standup]"
 
     def test_gaze_slack(self):
         gaze = {"speech": {"target": "slack", "params": {"room": "#general"}}}
         tag = asdaaas.context_left_tag(100000, 200000, turns_since_compaction=2, gaze=gaze)
-        assert tag == "\n[Context left 70k | compaction available | slack/#general]"
+        assert tag == "\n[Context left 70k till autocompaction | compaction available | slack/#general]"
 
     def test_gaze_no_compaction_status(self):
         gaze = {"speech": {"target": "irc", "params": {"room": "pm:eric"}}}
         tag = asdaaas.context_left_tag(100000, 200000, gaze=gaze)
-        assert tag == "\n[Context left 70k | irc/pm:eric]"
+        assert tag == "\n[Context left 70k till autocompaction | irc/pm:eric]"
 
     def test_gaze_just_compacted(self):
         gaze = {"speech": {"target": "irc", "params": {"room": "pm:eric"}}}
@@ -2040,17 +2040,17 @@ class TestContextLeftTag:
 
     def test_gaze_none_no_label(self):
         tag = asdaaas.context_left_tag(100000, 200000, turns_since_compaction=2, gaze=None)
-        assert tag == "\n[Context left 70k | compaction available]"
+        assert tag == "\n[Context left 70k till autocompaction | compaction available]"
 
     def test_gaze_no_speech(self):
         gaze = {"speech": None, "thoughts": None}
         tag = asdaaas.context_left_tag(100000, 200000, turns_since_compaction=2, gaze=gaze)
-        assert tag == "\n[Context left 70k | compaction available | none]"
+        assert tag == "\n[Context left 70k till autocompaction | compaction available | none]"
 
     def test_gaze_adapter_only_no_room(self):
         gaze = {"speech": {"target": "irc", "params": {}}}
         tag = asdaaas.context_left_tag(100000, 200000, turns_since_compaction=2, gaze=gaze)
-        assert tag == "\n[Context left 70k | compaction available | irc]"
+        assert tag == "\n[Context left 70k till autocompaction | compaction available | irc]"
 
 
 class TestGazeLabel:

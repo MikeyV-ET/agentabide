@@ -219,11 +219,9 @@ def context_left_tag(total_tokens, context_window, turns_since_compaction=None, 
     not before the theoretical maximum. This is the real usable budget.
     
     Includes compaction status and gaze:
-      [Context left 89k | just compacted | irc/pm:eric]
-      [Context left 85k | compacted 1 turn ago | irc/#standup]
-      [Context left 80k | compaction available | slack/#general]
-      [Context left 80k | irc/pm:eric]              -- no compaction info
-      [Context left 80k]                            -- no compaction, no gaze
+      [Context left 89k till autocompaction | just compacted | irc/pm:eric]
+      [Context left 85k till autocompaction | compacted 1 turn ago | irc/#standup]
+      [Context left 80k till autocompaction | compaction available | slack/#general]
     
     Returns empty string if context_window is 0 or total_tokens is 0.
     """
@@ -239,7 +237,7 @@ def context_left_tag(total_tokens, context_window, turns_since_compaction=None, 
     else:
         left_str = f"{k:.1f}k"
     
-    parts = [f"Context left {left_str}"]
+    parts = [f"Context left {left_str} till autocompaction"]
     
     if turns_since_compaction is not None:
         if turns_since_compaction == 0:
