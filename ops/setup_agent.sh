@@ -51,13 +51,18 @@ mkdir -p "$AGENT_HOME/asdaaas/adapters/"{irc,localmail,remind,session,context,he
 mkdir -p "$ASDAAAS_DIR/adapters"
 
 # Step 2: Create AGENTS.md
-if [ -f "$SCRIPT_DIR/../SAMPLE_AGENTS.md" ]; then
-    SAMPLE="$SCRIPT_DIR/../SAMPLE_AGENTS.md"
-elif [ -f "$SCRIPT_DIR/../../templates/SAMPLE_AGENTS.md" ]; then
-    SAMPLE="$SCRIPT_DIR/../../templates/SAMPLE_AGENTS.md"
-else
-    SAMPLE=""
-fi
+# Search for templates in multiple locations (flat layout and split layout)
+SAMPLE=""
+for candidate in \
+    "$SCRIPT_DIR/../SAMPLE_AGENTS.md" \
+    "$SCRIPT_DIR/../templates/SAMPLE_AGENTS.md" \
+    "$SCRIPT_DIR/../../templates/SAMPLE_AGENTS.md" \
+    "$SCRIPT_DIR/../../SAMPLE_AGENTS.md"; do
+    if [ -f "$candidate" ]; then
+        SAMPLE="$candidate"
+        break
+    fi
+done
 
 if [ -n "$SAMPLE" ]; then
     cp "$SAMPLE" "$AGENT_HOME/AGENTS.md"
