@@ -85,10 +85,15 @@ AGENT_NAMES_CSV=""
 for agent in "${AGENTS[@]}"; do
     session=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent']['session'])")
     home=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent']['home'])")
+    model=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('model', ''))" 2>/dev/null)
     log_file="$LOG_DIR/asdaaas_$(echo "$agent" | tr '[:upper:]' '[:lower:]').log"
 
-    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home" > "$log_file" 2>&1 &
-    echo "$agent: PID $! (session=$session, log=$log_file)"
+    MODEL_FLAG=""
+    if [ -n "$model" ]; then
+        MODEL_FLAG="--model $model"
+    fi
+    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home" $MODEL_FLAG > "$log_file" 2>&1 &
+    echo "$agent: PID $! (session=$session, model=${model:-default}, log=$log_file)"
 
     if [ -n "$AGENT_NAMES_CSV" ]; then
         AGENT_NAMES_CSV="$AGENT_NAMES_CSV,$agent"

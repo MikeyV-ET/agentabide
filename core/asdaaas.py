@@ -1534,7 +1534,7 @@ def request_shutdown_from_command(agent_name):
 # MAIN LOOP
 # ============================================================================
 
-async def main(agent_name, session_id=None, agent_cwd=None):
+async def main(agent_name, session_id=None, agent_cwd=None, model=None):
     global _shutdown_requested
 
     # Register signal handlers for graceful shutdown
@@ -1589,9 +1589,12 @@ async def main(agent_name, session_id=None, agent_cwd=None):
     # Capture code version at startup (cached for lifetime of process)
     version = get_code_version()
     print(f"[asdaaas] ASDAAAS v2 starting for {agent_name} (code: {version})")
-    print(f"[asdaaas] Spawning grok agent stdio...")
+    cmd = ["grok", "agent", "stdio"]
+    if model:
+        cmd.extend(["-m", model])
+    print(f"[asdaaas] Spawning {' '.join(cmd)}...")
     proc = await asyncio.create_subprocess_exec(
-        "grok", "agent", "stdio",
+        *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -2243,9 +2246,10 @@ if __name__ == "__main__":
     parser.add_argument("--agent", default="Test", help="Agent name")
     parser.add_argument("--cwd", default=str(config.agents_home.parent), help="Working directory for agent")
     parser.add_argument("--session", default=None, help="Session ID to load")
+    parser.add_argument("--model", "-m", default=None, help="Model ID (e.g., coding-mix-latest)")
     args = parser.parse_args()
 
     try:
-        asyncio.run(main(args.agent, args.session, args.cwd))
+        asyncio.run(main(args.agent, args.session, args.cwd, args.model))
     except KeyboardInterrupt:
         print("\n[asdaaas] Shut down.")
