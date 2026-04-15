@@ -189,6 +189,8 @@ def get_code_version():
     return _code_version
 
 
+_current_model_id = "unknown"
+
 def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW):
     agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
     health = {
@@ -201,6 +203,7 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         "contextWindow": context_window,
         "last_activity": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "code_version": get_code_version(),
+        "model": _current_model_id,
     }
     path = agent_dir(agent_name) / "health.json"
     tmp = str(path) + ".tmp"
@@ -1649,6 +1652,21 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
     resp = await wait_for_response(stdout, _rpc_id, timeout=120)
     sid = resp.get("result", {}).get("sessionId", session_id or "unknown")
     print(f"[asdaaas] Session: {sid}")
+
+    # ---- Read model from session summary ----
+    global _current_model_id
+    _current_model = model  # CLI override takes precedence
+    if not _current_model:
+        try:
+            encoded_cwd = agent_cwd.replace("/", "%2F")
+            summary_path = config.grok_sessions_dir / encoded_cwd / sid / "summary.json"
+            with open(summary_path) as f:
+                summary = json.load(f)
+            _current_model = summary.get("current_model_id", "unknown")
+        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+            _current_model = "unknown"
+    _current_model_id = _current_model
+    print(f"[asdaaas] Model: {_current_model_id}")
 
     # ---- Yolo mode ----
     print("[asdaaas] /yolo on...")
