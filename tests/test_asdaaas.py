@@ -528,10 +528,44 @@ class TestFormatDoorbell:
         assert "delivery=" not in result
 
     def test_no_id_no_meta(self):
-        """Without id, no meta parenthetical."""
+        """Without id, reply hint still present for non-system adapters."""
         bell = {"adapter": "localmail", "text": "mail"}
         result = asdaaas.format_doorbell(bell)
-        assert result == "[localmail] mail"
+        assert result == "[localmail (reply_via=localmail outbox)] mail"
+
+    def test_system_adapter_no_reply_hint(self):
+        """System adapters (session, operator, context, heartbeat) have no reply hint."""
+        bell = {"adapter": "session", "command": "compact", "text": "compacting"}
+        result = asdaaas.format_doorbell(bell)
+        assert "reply_via" not in result
+
+
+class TestMidturnMessage:
+    def test_message_before_response(self):
+        """Message timestamped before last response is flagged as mid-turn."""
+        msg = {"ts": "2026-04-16T20:00:00", "text": "hello"}
+        assert asdaaas._is_midturn_message(msg, "2026-04-16T20:01:00") is True
+
+    def test_message_after_response(self):
+        """Message timestamped after last response is NOT flagged."""
+        msg = {"ts": "2026-04-16T20:02:00", "text": "hello"}
+        assert asdaaas._is_midturn_message(msg, "2026-04-16T20:01:00") is False
+
+    def test_no_last_response(self):
+        """No last_response_ts means no flag (first turn)."""
+        msg = {"ts": "2026-04-16T20:00:00", "text": "hello"}
+        assert asdaaas._is_midturn_message(msg, None) is False
+
+    def test_no_message_ts(self):
+        """Message without timestamp is not flagged."""
+        msg = {"text": "hello"}
+        assert asdaaas._is_midturn_message(msg, "2026-04-16T20:01:00") is False
+
+    def test_same_timestamp(self):
+        """Message at exact same timestamp is NOT flagged (not strictly before)."""
+        ts = "2026-04-16T20:01:00"
+        msg = {"ts": ts, "text": "hello"}
+        assert asdaaas._is_midturn_message(msg, ts) is False
 
 
 class TestAckDoorbells:

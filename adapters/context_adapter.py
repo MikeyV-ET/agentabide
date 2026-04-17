@@ -67,10 +67,7 @@ ALL_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco"]
 # ============================================================================
 
 DEFAULT_THRESHOLDS = [
-    {"pct": 45, "priority": 5, "level": "info",     "advice": "you're approaching half capacity"},
-    {"pct": 65, "priority": 3, "level": "advisory",  "advice": "start wrapping up large tasks, consider flushing state to disk"},
-    {"pct": 80, "priority": 2, "level": "warning",   "advice": "flush state to disk NOW — compaction approaching"},
-    {"pct": 88, "priority": 1, "level": "critical",  "advice": "compaction imminent — stop new work, finalize notes"},
+    {"pct": 80, "priority": 3, "level": "reminder", "advice": "ensure current work is committed and documented (before/after). Keep working"},
 ]
 
 
@@ -203,9 +200,7 @@ def read_agent_awareness(agent):
 
 # Default advice text for thresholds generated from awareness percentages
 _LEVEL_MAP = [
-    (85, 1, "critical",  "compaction imminent -- stop new work, finalize notes"),
-    (75, 2, "warning",   "flush state to disk NOW -- compaction approaching"),
-    (60, 3, "advisory",  "start wrapping up large tasks, consider flushing state to disk"),
+    (75, 3, "reminder",  "ensure current work is committed and documented (before/after). Keep working"),
     (0,  5, "info",      "informational checkpoint"),
 ]
 

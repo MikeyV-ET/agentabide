@@ -290,45 +290,40 @@ class TestThresholdTracker:
         to_fire = tracker.check("Trip", 80000, 200000)  # 40%
         assert len(to_fire) == 0
 
-    def test_fire_at_45_percent(self):
+    def test_fire_at_80_percent(self):
         tracker = context_adapter.ThresholdTracker()
-        to_fire = tracker.check("Trip", 90000, 200000)  # 45%
+        to_fire = tracker.check("Trip", 160000, 200000)  # 80%
         assert len(to_fire) == 1
-        assert to_fire[0]["pct"] == 45
-        assert to_fire[0]["level"] == "info"
+        assert to_fire[0]["pct"] == 80
+        assert to_fire[0]["level"] == "reminder"
 
-    def test_fire_multiple_thresholds_at_once(self):
+    def test_no_fire_below_80(self):
         tracker = context_adapter.ThresholdTracker()
-        to_fire = tracker.check("Trip", 170000, 200000)  # 85%
-        # Should fire 45%, 65%, 80%
-        fired_pcts = {t["pct"] for t in to_fire}
-        assert 45 in fired_pcts
-        assert 65 in fired_pcts
-        assert 80 in fired_pcts
-        assert 88 not in fired_pcts  # 85% < 88%
+        to_fire = tracker.check("Trip", 140000, 200000)  # 70%
+        assert len(to_fire) == 0
 
     def test_no_double_fire(self):
         tracker = context_adapter.ThresholdTracker()
-        tracker.check("Trip", 90000, 200000)  # 45% — fires
-        to_fire = tracker.check("Trip", 91000, 200000)  # still ~45% — should NOT fire again
+        tracker.check("Trip", 160000, 200000)  # 80% -- fires
+        to_fire = tracker.check("Trip", 161000, 200000)  # still ~80% -- should NOT fire again
         assert len(to_fire) == 0
 
     def test_reset_after_compaction(self):
         tracker = context_adapter.ThresholdTracker()
-        tracker.check("Trip", 170000, 200000)  # 85% — fires 45, 65, 80
+        tracker.check("Trip", 170000, 200000)  # 85% -- fires 80
         # Compaction drops to 20%
         to_fire = tracker.check("Trip", 40000, 200000)
-        # Should have reset — no new thresholds crossed yet
+        # Should have reset -- no new thresholds crossed yet
         assert len(to_fire) == 0
         # Now climb back up
-        to_fire = tracker.check("Trip", 95000, 200000)  # 47.5%
+        to_fire = tracker.check("Trip", 165000, 200000)  # 82.5%
         assert len(to_fire) == 1
-        assert to_fire[0]["pct"] == 45
+        assert to_fire[0]["pct"] == 80
 
     def test_independent_agents(self):
         tracker = context_adapter.ThresholdTracker()
-        tracker.check("Trip", 90000, 200000)  # Trip at 45%
-        to_fire = tracker.check("Q", 90000, 200000)  # Q at 45% — should fire independently
+        tracker.check("Trip", 160000, 200000)  # Trip at 80%
+        to_fire = tracker.check("Q", 160000, 200000)  # Q at 80% -- should fire independently
         assert len(to_fire) == 1
 
     def test_zero_context_window(self):
@@ -340,17 +335,13 @@ class TestThresholdTracker:
         tracker = context_adapter.ThresholdTracker()
         to_fire = tracker.check("Trip", 190000, 200000)  # 95%
         fired_pcts = {t["pct"] for t in to_fire}
-        assert fired_pcts == {45, 65, 80, 88}
+        assert fired_pcts == {80}
 
-    def test_priority_ordering(self):
+    def test_single_threshold_priority(self):
         tracker = context_adapter.ThresholdTracker()
         to_fire = tracker.check("Trip", 190000, 200000)  # 95%
-        # 88% should have priority 1 (highest), 45% should have priority 5 (lowest)
-        for t in to_fire:
-            if t["pct"] == 88:
-                assert t["priority"] == 1
-            if t["pct"] == 45:
-                assert t["priority"] == 5
+        assert len(to_fire) == 1
+        assert to_fire[0]["priority"] == 3
 
 
 class TestContextDoorbellWriting:
@@ -801,32 +792,31 @@ class TestContextThresholdPrefs:
         thresholds = context_adapter.get_context_thresholds(awareness)
         levels = {t["pct"]: t["level"] for t in thresholds}
         assert levels[30] == "info"
-        assert levels[70] == "advisory"
-        assert levels[85] == "critical"
-        assert levels[90] == "critical"
+        assert levels[70] == "info"
+        assert levels[85] == "reminder"
+        assert levels[90] == "reminder"
 
     def test_level_for_pct(self):
         _, level, _ = context_adapter._level_for_pct(90)
-        assert level == "critical"
+        assert level == "reminder"
         _, level, _ = context_adapter._level_for_pct(80)
-        assert level == "warning"
+        assert level == "reminder"
         _, level, _ = context_adapter._level_for_pct(65)
-        assert level == "advisory"
+        assert level == "info"
         _, level, _ = context_adapter._level_for_pct(40)
         assert level == "info"
 
     def test_threshold_tracker_per_agent_override(self):
         tracker = context_adapter.ThresholdTracker()
-        # Default thresholds: 45, 65, 80, 88
-        # At 50%, only 45% should fire with defaults
+        # Default thresholds: 80 only
+        # At 50%, nothing should fire with defaults
         to_fire = tracker.check("Trip", 100000, 200000)
-        assert len(to_fire) == 1
-        assert to_fire[0]["pct"] == 45
+        assert len(to_fire) == 0
 
         # Now use per-agent thresholds for Q: [30, 50]
         custom = [
             {"pct": 30, "priority": 5, "level": "info", "advice": "checkpoint"},
-            {"pct": 50, "priority": 3, "level": "advisory", "advice": "halfway"},
+            {"pct": 50, "priority": 3, "level": "reminder", "advice": "halfway"},
         ]
         to_fire = tracker.check("Q", 100000, 200000, thresholds=custom)  # 50%
         pcts = {t["pct"] for t in to_fire}

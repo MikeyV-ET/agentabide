@@ -27,6 +27,7 @@ Usage:
 """
 
 import asyncio
+import datetime
 import json
 import os
 import secrets
@@ -36,6 +37,8 @@ import time
 import argparse
 import tempfile
 from pathlib import Path
+from agent_backend import AgentBackend, ResponseResult
+from grok_backend import GrokBackend
 
 # Graceful shutdown flag — set by SIGTERM/SIGINT or "shutdown" command
 _shutdown_requested = False
@@ -432,9 +435,25 @@ def format_background_doorbell(msg):
     summary = text[:120] + "..." if len(text) > 120 else text
     
     if room:
-        return f"[background] {sender} in {room}: {summary}"
+        return f"[background] {sender} in {room} (reply_via={adapter} outbox): {summary}"
     else:
-        return f"[background] {sender} (via {adapter}): {summary}"
+        return f"[background] {sender} (via {adapter}, reply_via={adapter} outbox): {summary}"
+
+
+def _is_midturn_message(msg, last_response_ts):
+    """Check if a message was sent before the agent's last response completed.
+    Returns True if the message timestamp predates last_response_ts,
+    meaning the sender wrote it during the agent's previous turn and
+    is NOT responding to what the agent just said."""
+    if last_response_ts is None:
+        return False
+    msg_ts = msg.get("ts")
+    if not msg_ts:
+        return False
+    try:
+        return msg_ts < last_response_ts
+    except TypeError:
+        return False
 
 
 class PendingQueue:
@@ -981,7 +1000,7 @@ def format_doorbell(bell):
     else:
         prefix = f"[{adapter}"
     
-    # Add id, delivery info, and timestamp
+    # Add id, delivery info, timestamp, and reply hint
     meta_parts = []
     if bell_id:
         meta_parts.append(f"id={bell_id}")
@@ -990,6 +1009,9 @@ def format_doorbell(bell):
     ts = bell.get("ts")
     if ts:
         meta_parts.append(f"ts={ts}")
+    # Reply hint: tells agent where to send response for non-gaze adapters
+    if adapter not in ("session", "operator", "context", "heartbeat", "continue"):
+        meta_parts.append(f"reply_via={adapter} outbox")
     
     if meta_parts:
         prefix += f" ({', '.join(meta_parts)})"
@@ -1537,7 +1559,7 @@ def request_shutdown_from_command(agent_name):
 # MAIN LOOP
 # ============================================================================
 
-async def main(agent_name, session_id=None, agent_cwd=None, model=None):
+async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=None):
     global _shutdown_requested
 
     # Register signal handlers for graceful shutdown
@@ -1592,26 +1614,30 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
     # Capture code version at startup (cached for lifetime of process)
     version = get_code_version()
     print(f"[asdaaas] ASDAAAS v2 starting for {agent_name} (code: {version})")
-    cmd = ["grok", "agent", "stdio"]
-    if model:
-        cmd.extend(["-m", model])
-    print(f"[asdaaas] Spawning {' '.join(cmd)}...")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=agent_cwd,
-    )
-    print(f"[asdaaas] PID {proc.pid}")
 
-    stdin, stdout = proc.stdin, proc.stdout
-    total_tokens = 0
-    context_window = CONTEXT_WINDOW
+    # ---- Create backend if not provided (default: GrokBackend) ----
+    if backend is None:
+        try:
+            backend = GrokBackend(grok_sessions_dir=config.grok_sessions_dir)
+        except Exception:
+            backend = GrokBackend()
+
+    # ---- Start backend (spawn, init, session, model, yolo) ----
+    print(f"[asdaaas] Starting backend: {type(backend).__name__}")
+    sid = await backend.start(agent_cwd, model=model, session_id=session_id)
+    print(f"[asdaaas] PID {backend.proc.pid if backend.proc else '?'}")
+    print(f"[asdaaas] Session: {sid}")
+
+    total_tokens = backend.total_tokens
+    context_window = backend.context_window
+    last_response_ts = None  # ISO timestamp of agent's last response completion
+
+    # Expose model ID to module-level for context_left_tag
+    global _current_model_id
+    _current_model_id = backend.model_id
+    print(f"[asdaaas] Model: {_current_model_id}")
 
     # Throttled callback for real-time health updates during long responses.
-    # Writes health file at most every 5 seconds so the dashboard can show
-    # live token counts while the agent is mid-turn doing tool calls.
     _last_health_write = 0
 
     def _on_streaming_meta(tokens):
@@ -1622,61 +1648,6 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
             write_health(agent_name, "working", f"streaming ({tokens} tokens)", tokens, context_window)
             _last_health_write = now
 
-    # ---- Initialize ----
-    print("[asdaaas] initialize...")
-    await send(stdin, rpc_request("initialize", {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "asdaaas", "version": "0.2"},
-    }))
-    resp = await wait_for_response(stdout, _rpc_id, timeout=30)
-    print(f"[asdaaas] init OK")
-
-    await send(stdin, rpc_notification("notifications/initialized"))
-
-    # ---- Load or create session ----
-    if session_id:
-        print(f"[asdaaas] Loading session {session_id}...")
-        await send(stdin, rpc_request("session/load", {
-            "sessionId": session_id,
-            "cwd": agent_cwd,
-            "mcpServers": [],
-        }))
-    else:
-        print("[asdaaas] New session...")
-        await send(stdin, rpc_request("session/new", {
-            "cwd": agent_cwd,
-            "mcpServers": [],
-        }))
-
-    resp = await wait_for_response(stdout, _rpc_id, timeout=120)
-    sid = resp.get("result", {}).get("sessionId", session_id or "unknown")
-    print(f"[asdaaas] Session: {sid}")
-
-    # ---- Read model from session summary ----
-    global _current_model_id
-    _current_model = model  # CLI override takes precedence
-    if not _current_model:
-        try:
-            encoded_cwd = agent_cwd.replace("/", "%2F")
-            summary_path = config.grok_sessions_dir / encoded_cwd / sid / "summary.json"
-            with open(summary_path) as f:
-                summary = json.load(f)
-            _current_model = summary.get("current_model_id", "unknown")
-        except (FileNotFoundError, json.JSONDecodeError, TypeError):
-            _current_model = "unknown"
-    _current_model_id = _current_model
-    print(f"[asdaaas] Model: {_current_model_id}")
-
-    # ---- Yolo mode ----
-    print("[asdaaas] /yolo on...")
-    await send(stdin, rpc_request("session/prompt", {
-        "sessionId": sid,
-        "prompt": [{"type": "text", "text": "/yolo on"}],
-    }))
-    _, _, meta = await collect_response(stdout, _rpc_id, timeout=10)
-    if meta.get("totalTokens"):
-        total_tokens = meta["totalTokens"]
     print("[asdaaas] Ready.")
 
     write_health(agent_name, "ready", f"session={sid}", total_tokens, context_window)
@@ -1735,43 +1706,26 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                     compact_pending_turns = 0
                     print(f"[asdaaas] Compact confirmed by {agent_name}")
                     tokens_before = total_tokens
-                    await send(stdin, rpc_request("session/prompt", {
-                        "sessionId": sid,
-                        "prompt": [{"type": "text", "text": "/compact"}],
-                    }))
+                    # Send /compact via backend
+                    compact_handle = await backend.send_prompt("/compact")
                     # Compaction can be silent for 60-120s while the binary summarizes.
-                    # Use long keepalive so we don't bail during the silence.
-                    _, _, meta = await collect_response(stdout, _rpc_id, timeout=300,
-                                                        keepalive_timeout=180.0, max_wall_clock=300.0)
-                    if meta.get("totalTokens"):
-                        total_tokens = meta["totalTokens"]
+                    compact_result = await backend.collect_response(
+                        compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
+                    total_tokens = backend.total_tokens
 
-                    # The /compact response frame often carries stale totalTokens
-                    # (pre-compaction count). Send a probe prompt to force the
-                    # grok binary to recalculate and return the real post-compaction
-                    # token count. This also serves as the post-compaction
-                    # notification to the agent.
-                    # Don't include context_left_tag on probe -- total_tokens
-                    # is still stale here. The probe's job is to get the real
-                    # count. The next real prompt will have the correct tag.
+                    # Probe to get real post-compaction token count
                     probe_text = "[Compaction complete. You are resuming from a compacted context.]"
-                    await drain_stale_frames(stdout, agent_name)
-                    await send(stdin, rpc_request("session/prompt", {
-                        "sessionId": sid,
-                        "prompt": [{"type": "text", "text": probe_text}],
-                    }))
-                    # Post-compaction probe: agent may read notebooks, do tool calls.
-                    # Use generous keepalive but normal max wall clock.
-                    probe_speech, _, probe_meta = await collect_response(stdout, _rpc_id, timeout=120,
-                                                                         keepalive_timeout=60.0, max_wall_clock=300.0,
-                                                                         on_meta=_on_streaming_meta)
-                    if probe_meta.get("totalTokens"):
-                        total_tokens = probe_meta["totalTokens"]
-                        print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
+                    await backend.drain_stale()
+                    probe_handle = await backend.send_prompt(probe_text)
+                    probe_result = await backend.collect_response(
+                        probe_handle, on_meta=_on_streaming_meta,
+                        keepalive_timeout=60.0, max_wall_clock=300.0)
+                    total_tokens = backend.total_tokens
+                    print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
                     # Route probe response if agent said anything
-                    if probe_speech.strip():
+                    if probe_result.speech.strip():
                         gaze = read_gaze(agent_name)
-                        write_to_outbox(agent_name, probe_speech.strip(), gaze.get("speech"), "speech")
+                        write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
 
                     _prev_tokens = total_tokens  # prevent false auto-compaction detection
                     turns_since_compaction = 0
@@ -1989,22 +1943,19 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                 bell_lines = [format_doorbell(bell) for bell in bells]
                 batch_text = "\n".join(bell_lines) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                 print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
-                await drain_stale_frames(stdout, agent_name)
-                await send(stdin, rpc_request("session/prompt", {
-                    "sessionId": sid,
-                    "prompt": [{"type": "text", "text": batch_text}],
-                }))
-                speech, thoughts, meta = await collect_response(stdout, _rpc_id, timeout=120, on_meta=_on_streaming_meta)
-                if meta.get("totalTokens"):
-                    total_tokens = meta["totalTokens"]
+                await backend.drain_stale()
+                bell_handle = await backend.send_prompt(batch_text)
+                bell_result = await backend.collect_response(bell_handle, on_meta=_on_streaming_meta)
+                total_tokens = backend.total_tokens
                 turns_since_compaction += 1
+                last_response_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                 # Route doorbell response through gaze (agent might respond to it)
-                if speech.strip():
+                if bell_result.speech.strip():
                     gaze = read_gaze(agent_name)
-                    write_to_outbox(agent_name, speech.strip(), gaze.get("speech"), "speech")
-                    if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
-                        write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
+                    write_to_outbox(agent_name, bell_result.speech.strip(), gaze.get("speech"), "speech")
+                    if bell_result.thoughts.strip() and gaze.get("thoughts") and bell_result.thoughts.strip() != bell_result.speech.strip():
+                        write_to_outbox(agent_name, bell_result.thoughts.strip(), gaze.get("thoughts"), "thoughts")
                     write_health(agent_name, "active", f"doorbell response ({len(bells)} bells)", total_tokens, context_window)
 
             # ---- 3. Poll per-adapter inboxes + legacy inbox ----
@@ -2015,8 +1966,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
             if timeout_bells:
                 # Deliver timeout notifications directly to stdin
                 for tb in timeout_bells:
-                    proc.stdin.write((tb["text"] + "\n").encode())
-                    await proc.stdin.drain()
+                    backend.proc.stdin.write((tb["text"] + "\n").encode())
+                    await backend.proc.stdin.drain()
                     print(f"[asdaaas] ATTENTION TIMEOUT delivered to {agent_name}: {tb['msg_id']}")
                 # Re-read attentions after removing expired ones
                 attentions = poll_attentions(agent_name)
@@ -2090,8 +2041,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                         # gaze filtering. The agent declared this expectation;
                         # the response must reach them regardless of current gaze.
                         response_text = response_bell["text"]
-                        proc.stdin.write((response_text + "\n").encode())
-                        await proc.stdin.drain()
+                        backend.proc.stdin.write((response_text + "\n").encode())
+                        await backend.proc.stdin.drain()
                         print(f"[asdaaas] ATTENTION RESPONSE delivered to {agent_name}: {matched_attn['msg_id']}")
                         # Re-read attentions (one was resolved)
                         attentions = poll_attentions(agent_name)
@@ -2118,20 +2069,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                     else:  # doorbell
                         bell_text = format_background_doorbell(msg) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                         print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
-                        await drain_stale_frames(stdout, agent_name)
-                        await send(stdin, rpc_request("session/prompt", {
-                            "sessionId": sid,
-                            "prompt": [{"type": "text", "text": bell_text}],
-                        }))
-                        speech, thoughts, meta = await collect_response(stdout, _rpc_id, timeout=120, on_meta=_on_streaming_meta)
-                        if meta.get("totalTokens"):
-                            total_tokens = meta["totalTokens"]
+                        await backend.drain_stale()
+                        bg_handle = await backend.send_prompt(bell_text)
+                        bg_result = await backend.collect_response(bg_handle, on_meta=_on_streaming_meta)
+                        total_tokens = backend.total_tokens
                         turns_since_compaction += 1
+                        last_response_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
                         # Route background doorbell response through gaze
-                        if speech.strip():
-                            write_to_outbox(agent_name, speech.strip(), gaze.get("speech"), "speech")
-                            if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
-                                write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
+                        if bg_result.speech.strip():
+                            write_to_outbox(agent_name, bg_result.speech.strip(), gaze.get("speech"), "speech")
+                            if bg_result.thoughts.strip() and gaze.get("thoughts") and bg_result.thoughts.strip() != bg_result.speech.strip():
+                                write_to_outbox(agent_name, bg_result.thoughts.strip(), gaze.get("thoughts"), "thoughts")
                             write_health(agent_name, "active", f"background doorbell response", total_tokens, context_window)
                         continue
 
@@ -2146,7 +2094,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                     sender = msg.get("from", "unknown")
                     adapter = msg.get("adapter", "unknown")
                     text = msg.get("text", "").strip()
-                    prompt_text = f"<{sender} (via {adapter})> {text}"
+                    midturn = _is_midturn_message(msg, last_response_ts)
+                    flag = " [sent during your previous turn]" if midturn else ""
+                    prompt_text = f"<{sender} (via {adapter}){flag}> {text}"
                 else:
                     # Batched: each message on its own line, attributed
                     lines = []
@@ -2154,7 +2104,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                         sender = msg.get("from", "unknown")
                         adapter = msg.get("adapter", "unknown")
                         text = msg.get("text", "").strip()
-                        lines.append(f"<{sender} (via {adapter})> {text}")
+                        midturn = _is_midturn_message(msg, last_response_ts)
+                        flag = " [sent during your previous turn]" if midturn else ""
+                        lines.append(f"<{sender} (via {adapter}){flag}> {text}")
                     prompt_text = "\n".join(lines)
                     print(f"[asdaaas] BATCH: {len(in_room_msgs)} messages coalesced into single prompt")
 
@@ -2167,21 +2119,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                 # Drain any stale frames before sending new prompt.
                 # Prevents one-behind desync from auto-compaction or
                 # other unsolicited agent output.
-                await drain_stale_frames(stdout, agent_name)
+                await backend.drain_stale()
 
                 timer.mark("prompt_sent")
-                await send(stdin, rpc_request("session/prompt", {
-                    "sessionId": sid,
-                    "prompt": [{"type": "text", "text": prompt_text}],
-                }))
+                msg_handle = await backend.send_prompt(prompt_text)
 
                 # Stream intermediate speech to thoughts channel in real-time
                 gaze = read_gaze(agent_name)
                 st = StreamingThoughts(agent_name, gaze)
 
-                speech, thoughts, meta = await collect_response(
-                    stdout, _rpc_id, timer=timer, timeout=120,
-                    on_meta=_on_streaming_meta,
+                msg_result = await backend.collect_response(
+                    msg_handle, on_meta=_on_streaming_meta,
                     on_speech_chunk=st.on_chunk,
                     on_tool_call=st.on_tool_call)
                 # Don't flush remaining buffer -- text after the last tool call
@@ -2190,26 +2138,26 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
                 # st.flush() would duplicate final speech to thoughts channel.
                 timer.mark("prompt_complete")
 
-                if meta.get("totalTokens"):
-                    total_tokens = meta["totalTokens"]
+                total_tokens = backend.total_tokens
                 turns_since_compaction += 1
+                last_response_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                 # Re-read gaze -- agent may have changed it via tool call during response
                 gaze = read_gaze(agent_name)
 
                 # Route speech and thoughts through gaze (the room the agent is in)
-                if speech.strip():
-                    write_to_outbox(agent_name, speech.strip(), gaze.get("speech"), "speech")
+                if msg_result.speech.strip():
+                    write_to_outbox(agent_name, msg_result.speech.strip(), gaze.get("speech"), "speech")
                     timer.mark("outbox_done")
 
                     # Route model thoughts (agent_thought_chunk) if distinct from speech.
                     # Some models echo speech as thoughts -- skip if identical.
-                    if thoughts.strip() and gaze.get("thoughts") and thoughts.strip() != speech.strip():
-                        write_to_outbox(agent_name, thoughts.strip(), gaze.get("thoughts"), "thoughts")
+                    if msg_result.thoughts.strip() and gaze.get("thoughts") and msg_result.thoughts.strip() != msg_result.speech.strip():
+                        write_to_outbox(agent_name, msg_result.thoughts.strip(), gaze.get("thoughts"), "thoughts")
 
                     print(timer.log_line())
                     write_profile(agent_name, timer)
-                    write_health(agent_name, "active", f"responded {len(speech)} chars", total_tokens, context_window)
+                    write_health(agent_name, "active", f"responded {len(msg_result.speech)} chars", total_tokens, context_window)
                 else:
                     print(f"[asdaaas] {agent_name} -> (empty)")
                     print(timer.log_line())
@@ -2230,15 +2178,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None):
             await asyncio.sleep(2.0)
 
     # ---- Cleanup ----
-    print(f"[asdaaas] Stopping grok subprocess for {agent_name}...")
-    proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=10)
-        print(f"[asdaaas] {agent_name} subprocess exited cleanly")
-    except asyncio.TimeoutError:
-        print(f"[asdaaas] {agent_name} subprocess did not exit in 10s, killing")
-        proc.kill()
-        await proc.wait()
+    print(f"[asdaaas] Stopping {type(backend).__name__} subprocess for {agent_name}...")
+    await backend.shutdown()
     # Unregister from running_agents.json
     _unregister_running_agent(agent_name)
     print(f"[asdaaas] {agent_name} shut down.")
@@ -2265,9 +2206,20 @@ if __name__ == "__main__":
     parser.add_argument("--cwd", default=str(config.agents_home.parent), help="Working directory for agent")
     parser.add_argument("--session", default=None, help="Session ID to load")
     parser.add_argument("--model", "-m", default=None, help="Model ID (e.g., coding-mix-latest)")
+    parser.add_argument("--backend", default="grok", choices=["grok", "claude"],
+                        help="Agent backend (default: grok)")
+    parser.add_argument("--api-key", default=None,
+                        help="API key for claude backend (or set ANTHROPIC_API_KEY)")
     args = parser.parse_args()
 
+    # Create backend based on CLI argument
+    backend_instance = None
+    if args.backend == "claude":
+        from claude_backend import ClaudeBackend
+        backend_instance = ClaudeBackend(api_key=args.api_key)
+    # grok backend is created by default in main() when backend=None
+
     try:
-        asyncio.run(main(args.agent, args.session, args.cwd, args.model))
+        asyncio.run(main(args.agent, args.session, args.cwd, args.model, backend=backend_instance))
     except KeyboardInterrupt:
         print("\n[asdaaas] Shut down.")
