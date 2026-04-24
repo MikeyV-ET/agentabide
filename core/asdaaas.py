@@ -37,7 +37,7 @@ import time
 import argparse
 import tempfile
 from pathlib import Path
-from agent_backend import AgentBackend, ResponseResult
+from agent_backend import AgentBackend, ResponseResult, TurnCancelled
 from grok_backend import GrokBackend
 
 # Graceful shutdown flag — set by SIGTERM/SIGINT or "shutdown" command
@@ -424,20 +424,43 @@ def get_background_mode(msg, awareness):
     return bg_default
 
 
-def format_background_doorbell(msg):
-    """Format a background message as a doorbell notification."""
+def format_background_doorbell(msg, agent_name=None):
+    """Format a background message as a doorbell notification.
+    
+    When text exceeds 120 chars and agent_name is provided, the full message
+    is stored in a payload file and the doorbell includes the path for retrieval.
+    """
     sender = msg.get("from", "unknown")
     adapter = msg.get("adapter", "unknown")
     text = msg.get("text", "")
     _, room = get_msg_room(msg)
     
-    # Truncate text for doorbell summary
+    payload_hint = ""
+    if len(text) > 120 and agent_name:
+        payload_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / adapter / "payloads"
+        payload_dir.mkdir(parents=True, exist_ok=True)
+        msg_id = msg.get("id", secrets.token_hex(8))
+        payload_path = payload_dir / f"{msg_id}.json"
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(payload_dir), suffix=".tmp", prefix="bg_")
+            with os.fdopen(fd, "w") as f:
+                json.dump(msg, f, indent=2)
+            os.rename(tmp, str(payload_path))
+            size_kb = len(text) / 1024
+            approx_tokens = len(text) // 4
+            payload_hint = f"\n(Full message: cat {payload_path} \u2014 {size_kb:.1f}KB, ~{approx_tokens} tokens)"
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+    
     summary = text[:120] + "..." if len(text) > 120 else text
     
     if room:
-        return f"[background] {sender} in {room} (reply_via={adapter} outbox): {summary}"
+        return f"[background] {sender} in {room} (reply_via={adapter} outbox): {summary}{payload_hint}"
     else:
-        return f"[background] {sender} (via {adapter}, reply_via={adapter} outbox): {summary}"
+        return f"[background] {sender} (via {adapter}, reply_via={adapter} outbox): {summary}{payload_hint}"
 
 
 def _is_midturn_message(msg, last_response_ts):
@@ -982,6 +1005,28 @@ def _cleanup_compact_doorbells(agent_name):
         print(f"[asdaaas] Cleaned up {removed} compact_confirm doorbell(s)")
 
 
+def _cleanup_continue_doorbells(agent_name):
+    """Remove all continue doorbells from disk.
+
+    Called when delay until_event is set.  Continue doorbells persist like
+    all doorbells, so setting delay_until_event alone only prevents *new*
+    continues from being queued -- it doesn't stop already-queued ones from
+    being re-delivered each iteration.  (Bug_0003: Jr saw 50+ re-deliveries.)
+    """
+    bell_dir = agent_dir(agent_name) / "doorbells"
+    if not bell_dir.exists():
+        return
+    removed = 0
+    for f in bell_dir.glob("cont_*.json"):
+        try:
+            os.unlink(f)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        print(f"[asdaaas] Cleaned up {removed} continue doorbell(s)")
+
+
 def format_doorbell(bell):
     """Format a doorbell notification for delivery to agent stdin.
     
@@ -1097,6 +1142,29 @@ def write_command(agent_name, command):
     with open(fp, "w") as f:
         json.dump(command, f)
     return fp
+
+
+def cancel_turn_flag_path(agent_name):
+    """Path to the cancel sentinel file for an agent.
+    
+    When this file exists, asdaaas will cancel the current turn mid-flight:
+    kill the grok process, restart with session/load, deliver a doorbell.
+    The file is deleted after the cancel is processed.
+    """
+    return agent_dir(agent_name) / "cancel_turn.flag"
+
+
+async def watch_cancel_flag(agent_name, cancel_event, poll_interval=0.5):
+    """Background task: poll for cancel_turn.flag and set cancel_event when found."""
+    flag = cancel_turn_flag_path(agent_name)
+    while True:
+        try:
+            if flag.exists():
+                cancel_event.set()
+                return
+        except OSError:
+            pass
+        await asyncio.sleep(poll_interval)
 
 
 # ============================================================================
@@ -1648,6 +1716,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             write_health(agent_name, "working", f"streaming ({tokens} tokens)", tokens, context_window)
             _last_health_write = now
 
+    # ---- Cancel turn support ----
+    # cancel_event is set by the background watcher when cancel_turn.flag appears.
+    # It's passed to collect_response which raises TurnCancelled.
+    cancel_event = asyncio.Event()
+    cancel_watcher_task = None
+
     print("[asdaaas] Ready.")
 
     write_health(agent_name, "ready", f"session={sid}", total_tokens, context_window)
@@ -1783,6 +1857,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     if delay_val == "until_event":
                         delay_until_event = True
                         next_turn_delay = 0
+                        # Clear any existing continue doorbells -- the agent
+                        # is saying "don't wake me."  Without this, persistent
+                        # continue bells keep re-delivering every iteration.
+                        _cleanup_continue_doorbells(agent_name)
                         print(f"[asdaaas] Delay: until_event (standing by)")
                     else:
                         next_turn_delay = float(delay_val)
@@ -1850,16 +1928,29 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         compact_pending_turns = 0
                     print(f"[asdaaas] Force compact: executing immediately for {agent_name}")
                     try:
-                        result = compact_session(session_id, rpc_id_counter)
-                        rpc_id_counter += 1
-                        if result:
-                            total_tokens = result.get("totalTokens", total_tokens)
-                            turns_since_compaction = 0
-                            _prev_tokens = total_tokens
-                            _cleanup_compact_doorbells(agent_name)
-                            print(f"[asdaaas] Force compact succeeded: {total_tokens} tokens")
-                        else:
-                            print(f"[asdaaas] Force compact: compact_session returned None")
+                        tokens_before = total_tokens
+                        compact_handle = await backend.send_prompt("/compact")
+                        compact_result = await backend.collect_response(
+                            compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
+                        total_tokens = backend.total_tokens
+
+                        probe_text = "[Compaction complete. You are resuming from a compacted context.]"
+                        await backend.drain_stale()
+                        probe_handle = await backend.send_prompt(probe_text)
+                        probe_result = await backend.collect_response(
+                            probe_handle, on_meta=_on_streaming_meta,
+                            keepalive_timeout=60.0, max_wall_clock=300.0)
+                        total_tokens = backend.total_tokens
+                        print(f"[asdaaas] Force compact probe: real totalTokens={total_tokens}")
+                        if probe_result.speech.strip():
+                            gaze = read_gaze(agent_name)
+                            write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
+
+                        _prev_tokens = total_tokens
+                        turns_since_compaction = 0
+                        _cleanup_compact_doorbells(agent_name)
+                        write_health(agent_name, "ready", f"force-compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
+                        print(f"[asdaaas] Force compact: {tokens_before} -> {total_tokens}")
                     except Exception as e:
                         print(f"[asdaaas] Force compact failed: {e}")
 
@@ -1918,7 +2009,20 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     else:
                         print(f"[asdaaas] AWARENESS: error for {agent_name} -- {desc}")
 
-            # ---- 1b. Check watchdog timeouts (Phase 4.4) ----
+            # ---- 1b. Start cancel watcher for this iteration ----
+            # Watches for cancel_turn.flag during collect_response calls.
+            # Started fresh each iteration, cancelled at end.
+            cancel_event.clear()
+            if cancel_watcher_task and not cancel_watcher_task.done():
+                cancel_watcher_task.cancel()
+                try:
+                    await cancel_watcher_task
+                except asyncio.CancelledError:
+                    pass
+            cancel_watcher_task = asyncio.create_task(
+                watch_cancel_flag(agent_name, cancel_event))
+
+            # ---- 1c. Check watchdog timeouts (Phase 4.4) ----
             watchdog.deliver_timeout_doorbells(agent_name)
 
             # ---- 1c. Re-read adapter registrations periodically (Phase 7.2) ----
@@ -1945,10 +2049,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
                 await backend.drain_stale()
                 bell_handle = await backend.send_prompt(batch_text)
-                bell_result = await backend.collect_response(bell_handle, on_meta=_on_streaming_meta)
+                bell_result = await backend.collect_response(bell_handle, on_meta=_on_streaming_meta, cancel_event=cancel_event)
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
-                last_response_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                last_response_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
 
                 # Route doorbell response through gaze (agent might respond to it)
                 if bell_result.speech.strip():
@@ -2067,14 +2171,14 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         continue
 
                     else:  # doorbell
-                        bell_text = format_background_doorbell(msg) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
+                        bell_text = format_background_doorbell(msg, agent_name=agent_name) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
                         print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
                         await backend.drain_stale()
                         bg_handle = await backend.send_prompt(bell_text)
-                        bg_result = await backend.collect_response(bg_handle, on_meta=_on_streaming_meta)
+                        bg_result = await backend.collect_response(bg_handle, on_meta=_on_streaming_meta, cancel_event=cancel_event)
                         total_tokens = backend.total_tokens
                         turns_since_compaction += 1
-                        last_response_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        last_response_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
                         # Route background doorbell response through gaze
                         if bg_result.speech.strip():
                             write_to_outbox(agent_name, bg_result.speech.strip(), gaze.get("speech"), "speech")
@@ -2131,7 +2235,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 msg_result = await backend.collect_response(
                     msg_handle, on_meta=_on_streaming_meta,
                     on_speech_chunk=st.on_chunk,
-                    on_tool_call=st.on_tool_call)
+                    on_tool_call=st.on_tool_call,
+                    cancel_event=cancel_event)
                 # Don't flush remaining buffer -- text after the last tool call
                 # is the final speech, not intermediate thinking. Only text
                 # flushed at tool_call boundaries is thoughts.
@@ -2140,7 +2245,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
-                last_response_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                last_response_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
 
                 # Re-read gaze -- agent may have changed it via tool call during response
                 gaze = read_gaze(agent_name)
@@ -2166,6 +2271,62 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
             errors = 0
 
+        except TurnCancelled:
+            # Mid-turn cancel triggered via cancel_turn.flag
+            print(f"[asdaaas] CANCEL: Turn cancelled for {agent_name}")
+            
+            # Clean up the flag file
+            flag = cancel_turn_flag_path(agent_name)
+            try:
+                flag.unlink(missing_ok=True)
+            except OSError:
+                pass
+            
+            # Stop the cancel watcher if running
+            if cancel_watcher_task and not cancel_watcher_task.done():
+                cancel_watcher_task.cancel()
+                try:
+                    await cancel_watcher_task
+                except asyncio.CancelledError:
+                    pass
+            cancel_watcher_task = None
+            cancel_event.clear()
+            
+            # Kill and restart the backend
+            print(f"[asdaaas] CANCEL: Killing and restarting backend...")
+            write_health(agent_name, "restarting", "mid-turn cancel", total_tokens, context_window)
+            try:
+                new_sid = await backend.cancel_and_restart(agent_cwd)
+                total_tokens = backend.total_tokens
+                print(f"[asdaaas] CANCEL: Restarted. Session {new_sid}, {total_tokens} tokens")
+                write_health(agent_name, "active", f"cancelled and restarted", total_tokens, context_window)
+                
+                # Deliver a doorbell so the agent knows what happened
+                bell_dir = agent_dir(agent_name) / "doorbells"
+                bell_dir.mkdir(parents=True, exist_ok=True)
+                bell = {
+                    "adapter": "session",
+                    "command": "cancel_turn",
+                    "priority": 1,
+                    "text": "[session:cancel_turn] Your previous turn was cancelled by the operator. You have been restarted with your session intact. The partial turn was discarded.",
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix="cancel_")
+                with os.fdopen(fd, "w") as f:
+                    json.dump(bell, f)
+                os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+                
+                # Wake agent immediately
+                next_turn_delay = 0
+                delay_until_event = False
+                
+            except Exception as restart_err:
+                print(f"[asdaaas] CANCEL: Restart failed: {restart_err}")
+                import traceback
+                traceback.print_exc()
+                write_health(agent_name, "error", f"cancel restart failed: {restart_err}", total_tokens, context_window)
+                errors += 1
+
         except Exception as e:
             errors += 1
             print(f"[asdaaas] Error #{errors}: {e}")
@@ -2178,10 +2339,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             await asyncio.sleep(2.0)
 
     # ---- Cleanup ----
+    # Unregister first -- if backend.shutdown() hangs and the process
+    # gets killed, the agent should not appear as running.
+    _unregister_running_agent(agent_name)
     print(f"[asdaaas] Stopping {type(backend).__name__} subprocess for {agent_name}...")
     await backend.shutdown()
-    # Unregister from running_agents.json
-    _unregister_running_agent(agent_name)
     print(f"[asdaaas] {agent_name} shut down.")
 
 
@@ -2210,6 +2372,8 @@ if __name__ == "__main__":
                         help="Agent backend (default: grok)")
     parser.add_argument("--api-key", default=None,
                         help="API key for claude backend (or set ANTHROPIC_API_KEY)")
+    parser.add_argument("--grok-binary", default=None,
+                        help="Path to grok binary (default: 'grok' from PATH)")
     args = parser.parse_args()
 
     # Create backend based on CLI argument
@@ -2217,7 +2381,8 @@ if __name__ == "__main__":
     if args.backend == "claude":
         from claude_backend import ClaudeBackend
         backend_instance = ClaudeBackend(api_key=args.api_key)
-    # grok backend is created by default in main() when backend=None
+    elif args.grok_binary:
+        backend_instance = GrokBackend(grok_binary=args.grok_binary)
 
     try:
         asyncio.run(main(args.agent, args.session, args.cwd, args.model, backend=backend_instance))

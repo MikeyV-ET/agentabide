@@ -208,6 +208,45 @@ class TestFormatBackgroundDoorbell:
         assert "..." in result
         assert len(result) < 300
 
+    def test_long_text_payload_stored(self, tmp_path, monkeypatch):
+        """When text > 120 chars and agent_name provided, full message saved to payload file."""
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", tmp_path)
+        msg = {"from": "Trip", "adapter": "irc", "id": "test123",
+               "meta": {"room": "#standup"}, "text": "A" * 200}
+        result = asdaaas.format_background_doorbell(msg, agent_name="Sr")
+        assert "Full message: cat" in result
+        assert "test123.json" in result
+        payload_path = tmp_path / "Sr" / "asdaaas" / "adapters" / "irc" / "payloads" / "test123.json"
+        assert payload_path.exists()
+        stored = json.loads(payload_path.read_text())
+        assert stored["text"] == "A" * 200
+        assert stored["from"] == "Trip"
+
+    def test_short_text_no_payload(self, tmp_path, monkeypatch):
+        """Messages under 120 chars should not create payload files."""
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", tmp_path)
+        msg = {"from": "Trip", "adapter": "irc", "meta": {}, "text": "short msg"}
+        result = asdaaas.format_background_doorbell(msg, agent_name="Sr")
+        assert "Full message" not in result
+        assert "short msg" in result
+
+    def test_payload_no_agent_name(self):
+        """Without agent_name, long messages truncate but don't store payload."""
+        msg = {"from": "Trip", "adapter": "irc", "meta": {}, "text": "B" * 200}
+        result = asdaaas.format_background_doorbell(msg)
+        assert "..." in result
+        assert "Full message" not in result
+
+    def test_payload_includes_size_info(self, tmp_path, monkeypatch):
+        """Payload hint includes KB size and approximate token count."""
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", tmp_path)
+        text = "C" * 400
+        msg = {"from": "eric", "adapter": "irc", "id": "size_test",
+               "meta": {"room": "#standup"}, "text": text}
+        result = asdaaas.format_background_doorbell(msg, agent_name="Q")
+        assert "KB" in result
+        assert "tokens" in result
+
 
 class TestPendingQueue:
     """Test PendingQueue -- adapter-agnostic room queuing."""

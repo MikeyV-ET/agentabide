@@ -58,8 +58,9 @@ def _time_ago(iso_ts):
     try:
         dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            now = datetime.now()  # naive local time
+        else:
+            now = datetime.now(timezone.utc)
         delta = now - dt
         secs = int(delta.total_seconds())
         if secs < 0:
@@ -98,6 +99,50 @@ def _count_files(directory):
         return len([f for f in Path(directory).glob("*.json")])
     except (FileNotFoundError, PermissionError):
         return 0
+
+
+def _get_process_rss_mb(pid):
+    """Get RSS memory in MB for a PID via /proc."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # kB -> MB
+    except (FileNotFoundError, PermissionError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _get_updates_jsonl_size(agent_name):
+    """Get size of updates.jsonl for an agent's current session."""
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(f"/home/eric/agents/{agent_name}", safe="")
+        session_dir = Path.home() / ".grok" / "sessions" / encoded
+        if not session_dir.is_dir():
+            return None
+        # Most recent session directory (skip files like prompt_history.jsonl)
+        dirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if not dirs:
+            return None
+        latest = max(dirs, key=lambda p: p.name)
+        updates = latest / "updates.jsonl"
+        if updates.is_file():
+            return updates.stat().st_size
+    except (FileNotFoundError, ValueError, StopIteration):
+        pass
+    return None
+
+
+def _format_size(size_bytes):
+    """Format bytes as human-readable size."""
+    if size_bytes is None:
+        return "-"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f}K"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.0f}M"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f}G"
 
 
 def _get_running_agents():
@@ -152,12 +197,13 @@ def build_agent_table(agents):
     """Build the main agent status table."""
     table = Table(title="Agents", expand=True, show_lines=True)
     table.add_column("Agent", style="bold", width=10)
+    table.add_column("PID", width=8, justify="right")
     table.add_column("Status", width=10)
     table.add_column("Context", width=18)
+    table.add_column("RSS", width=8, justify="right")
+    table.add_column("Updates", width=8, justify="right")
     table.add_column("Last Activity", width=14)
-    table.add_column("Turns", width=8, justify="right")
     table.add_column("Doorbells", width=10, justify="right")
-    table.add_column("IRC In", width=8, justify="right")
     table.add_column("IRC Out", width=8, justify="right")
     table.add_column("Mail", width=8, justify="right")
 
@@ -170,22 +216,31 @@ def build_agent_table(agents):
             status = Text(health.get("status", "?"), style="green" if health.get("status") == "working" else "yellow")
             ctx = _context_bar(health.get("totalTokens", 0), health.get("contextWindow", 200000))
             last = _time_ago(health.get("last_activity", health.get("ts", "")))
-            turns = str(health.get("physical_turns", "?"))
+            pid = health.get("pid")
+            pid_str = str(pid) if pid else "-"
+            rss = _get_process_rss_mb(pid) if pid else None
+            rss_str = f"{rss:.0f}M" if rss else "-"
         else:
             status = Text("offline", style="red") if info.get("registered") else Text("found", style="dim")
             ctx = Text("-", style="dim")
             last = "-"
-            turns = "-"
+            pid_str = "-"
+            rss_str = "-"
+
+        updates_size = _get_updates_jsonl_size(name)
+        updates_str = _format_size(updates_size)
+        if updates_size and updates_size > 200 * 1024 * 1024:
+            updates_str = Text(updates_str, style="red")
+        elif updates_size and updates_size > 100 * 1024 * 1024:
+            updates_str = Text(updates_str, style="yellow")
 
         doorbells = _count_files(asdaaas_dir / "doorbells")
-        irc_in = _count_files(asdaaas_dir / "adapters" / "irc" / "inbox")
         irc_out = _count_files(asdaaas_dir / "adapters" / "irc" / "outbox")
         mail = _count_files(asdaaas_dir / "adapters" / "localmail" / "inbox")
 
         table.add_row(
-            name, status, ctx, last, turns,
+            name, pid_str, status, ctx, rss_str, updates_str, last,
             str(doorbells) if doorbells else "-",
-            str(irc_in) if irc_in else "-",
             str(irc_out) if irc_out else "-",
             str(mail) if mail else "-",
         )
@@ -246,8 +301,8 @@ def build_snapshot():
     lines.append("")
 
     # Agents
-    lines.append(f"{'Agent':<10} {'Status':<10} {'Context':<18} {'Last':<14} {'Turns':<8} {'Bells':<8} {'Mail':<8}")
-    lines.append("-" * 76)
+    lines.append(f"{'Agent':<10} {'PID':<8} {'Status':<10} {'Context':<18} {'RSS':<8} {'Updates':<8} {'Last':<14} {'Bells':<8} {'Mail':<8}")
+    lines.append("-" * 94)
     for name, info in agents.items():
         home = Path(info["home"])
         health = _read_json(home / "asdaaas" / "health.json")
@@ -257,15 +312,20 @@ def build_snapshot():
             window = health.get("contextWindow", 200000)
             pct = f"{total/window*100:.0f}%" if window else "?"
             last = _time_ago(health.get("last_activity", health.get("ts", "")))
-            turns = str(health.get("physical_turns", "?"))
+            pid = health.get("pid")
+            pid_str = str(pid) if pid else "-"
+            rss = _get_process_rss_mb(pid) if pid else None
+            rss_str = f"{rss:.0f}M" if rss else "-"
         else:
             status = "offline"
             pct = "-"
             last = "-"
-            turns = "-"
+            pid_str = "-"
+            rss_str = "-"
+        updates_str = _format_size(_get_updates_jsonl_size(name))
         bells = _count_files(home / "asdaaas" / "doorbells")
         mail = _count_files(home / "asdaaas" / "adapters" / "localmail" / "inbox")
-        lines.append(f"{name:<10} {status:<10} {pct:<18} {last:<14} {turns:<8} {bells:<8} {mail:<8}")
+        lines.append(f"{name:<10} {pid_str:<8} {status:<10} {pct:<18} {rss_str:<8} {updates_str:<8} {last:<14} {bells:<8} {mail:<8}")
 
     return "\n".join(lines)
 

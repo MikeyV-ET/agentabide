@@ -95,7 +95,7 @@ class Gruvbox:
 
 class Config:
     """Runtime configuration, set from CLI args."""
-    AGENT_NAME: str = "Trip"
+    AGENT_NAME: str = ""
     AGENTS_HOME: str = os.path.expanduser("~/agents")
     GROK_SESSIONS_DIR: Optional[str] = None  # Override for session directory
     SESSION_DIR: Optional[str] = None  # Auto-detected from sessions root
@@ -497,6 +497,8 @@ class SlashMenu(OptionList):
         {"name": "/todo add", "description": "Add a todo item"},
         {"name": "/todo done", "description": "Mark item as done"},
         {"name": "/todo rm", "description": "Remove a todo item"},
+        {"name": "/mail", "description": "Send localmail to an agent"},
+        {"name": "/mail all", "description": "Broadcast to all agents"},
         {"name": "/whoami", "description": "Show/change operator name"},
         {"name": "/help", "description": "Show help"},
         {"name": "/exit", "description": "Quit the TUI"},
@@ -774,22 +776,22 @@ class ToolCallPanel(Static):
         # Auto-collapse completed/failed panels
         if status in ("completed", "failed"):
             self._collapsed = True
-        self.refresh()
+        self.refresh(layout=True)
 
     def set_output(self, content: str):
         self.tool_output = content
-        self.refresh()
+        self.refresh(layout=True)
 
     def append_output(self, content: str):
         self.tool_output += content
-        self.refresh()
+        self.refresh(layout=True)
 
     MAX_ACTIVE_LINES = 15  # Max lines shown for active/running tool panels
 
     def on_click(self, event) -> None:
         """Toggle collapsed state on click."""
         self._collapsed = not self._collapsed
-        self.refresh()
+        self.refresh(layout=True)
 
     def render(self):
         # Status indicator
@@ -893,11 +895,12 @@ class AgentTabBar(Static):
     }
     """
 
-    active_agent = reactive("Trip")
+    active_agent = reactive("")
 
     def __init__(self, agents: list[str], **kwargs):
         super().__init__(**kwargs)
         self._agents = agents
+        self.active_agent = agents[0] if agents else ""
 
     def render(self) -> Text:
         text = Text()
@@ -938,7 +941,7 @@ class DynamicFooter(Static):
 
     IDLE_BINDINGS = [
         ("^c", "Interrupt"), ("^l", "Clear"), ("^g", "Gaze"),
-        ("^n", "Next Agent"), ("f1", "Thinking"), ("^q", "Quit"),
+        ("^n", "Next Agent"), ("f1", "Thinking"), ("f2", "Persist."), ("^q", "Quit"),
     ]
 
     GENERATING_BINDINGS = [
@@ -957,13 +960,35 @@ class DynamicFooter(Static):
 class ContentScroll(VerticalScroll):
     """VerticalScroll for agent content. Auto-loads history on mouse scroll at top."""
 
+    _follow_tail: bool = True
+
+    def on_mount(self) -> None:
+        self.auto_scroll = False
+
     def on_mouse_scroll_up(self, event) -> None:
-        """When mouse scrolls up and we're at the top, load history."""
+        """When user scrolls up, disable auto-follow and load history at top."""
+        self._follow_tail = False
         if self.scroll_y <= 0:
             try:
                 self.app._load_older_history()
             except Exception:
                 pass
+
+    def on_mouse_scroll_down(self, event) -> None:
+        """When user scrolls down, check if we've reached the bottom."""
+        self.set_timer(0.1, self._check_at_bottom)
+
+    def on_key(self, event) -> None:
+        """Track keyboard scrolling."""
+        if event.key in ("up", "pageup", "home"):
+            self._follow_tail = False
+        elif event.key in ("down", "pagedown"):
+            self.set_timer(0.1, self._check_at_bottom)
+
+    def _check_at_bottom(self) -> None:
+        """Re-enable auto-follow when scrolled to bottom."""
+        if self.max_scroll_y > 0 and self.scroll_y >= self.max_scroll_y - 2:
+            self._follow_tail = True
 
 
 class HookAnnotation(Static):
@@ -977,8 +1002,68 @@ class HookAnnotation(Static):
         return Text(f"  {self.annotation_message}", style=f"italic {Gruvbox.DARK4}")
 
 
+class TurnSeparator(Static):
+    """Visual separator between logical turns showing turn number and trigger."""
+
+    def __init__(self, turn_num: int, trigger: str, timestamp: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._turn_num = turn_num
+        self._trigger = trigger
+        self._timestamp = timestamp
+
+    def render(self) -> Text:
+        text = Text()
+        # Thin horizontal rule with turn info
+        text.append(" T", style=f"bold {Gruvbox.DARK4}")
+        text.append(f"{self._turn_num}", style=f"bold {Gruvbox.BR_AQUA}")
+        text.append(f" {self._trigger}", style=Gruvbox.DARK4)
+        if self._timestamp:
+            text.append(f"  {self._timestamp}", style=Gruvbox.DARK3)
+        # Fill remaining width with thin line
+        pad = max(0, 60 - len(text.plain))
+        text.append(" " + "\u2500" * pad, style=Gruvbox.DARK3)
+        return text
+
+
+def classify_turn_trigger(text: str) -> str:
+    """Classify a user_message_chunk's content into a human-readable trigger label."""
+    t = text.strip()
+    # asdaaas doorbells
+    if "[continue" in t:
+        return "continue"
+    if "[context" in t and "%" in t:
+        # Extract percentage
+        import re
+        m = re.search(r'(\d+)%', t)
+        pct = m.group(1) if m else "?"
+        return f"context {pct}%"
+    if "[heartbeat" in t or "heartbeat" in t.lower()[:50]:
+        return "heartbeat"
+    if "[session:compact" in t:
+        return "compact"
+    if "[Compaction complete" in t:
+        return "compaction done"
+    # localmail
+    if "localmail" in t.lower()[:60] or "[FROM:" in t[:30]:
+        import re
+        m = re.search(r'from[:\s]+(\w+)', t[:80], re.IGNORECASE)
+        src = m.group(1) if m else "?"
+        return f"mail from {src}"
+    # Eric via TUI
+    if "<eric" in t.lower()[:30] or "(via tui)" in t.lower()[:50]:
+        return "Eric (tui)"
+    # IRC message
+    if "irc" in t.lower()[:30] or "#" in t[:20]:
+        return "IRC"
+    # Generic — show first 30 chars
+    preview = t[:30].replace("\n", " ")
+    if len(t) > 30:
+        preview += "..."
+    return preview
+
+
 class UserMessage(Static):
-    """User message display — clean inline style with chevron prefix."""
+    """User message display -- clean inline style with chevron prefix."""
 
     def __init__(self, text: str, **kwargs):
         super().__init__(**kwargs)
@@ -1002,7 +1087,7 @@ class AgentMessage(Static):
     def append_chunk(self, text: str):
         self._chunks.append(text)
         self._text = "".join(self._chunks)
-        self.refresh()
+        self.refresh(layout=True)
 
     @property
     def full_text(self) -> str:
@@ -1026,7 +1111,7 @@ class ThinkingBlock(Static):
         self._text = "".join(self._chunks)
         # Rough token estimate: ~4 chars per token (GPT-style approximation)
         self._token_estimate = len(self._text) // 4
-        self.refresh()
+        self.refresh(layout=True)
 
     def render(self) -> Panel:
         # Show first/last few lines if very long
@@ -1096,6 +1181,183 @@ class OperatorScreen(ModalScreen[str]):
 
 
 # =============================================================================
+# Persistence Panel
+# =============================================================================
+
+class PersistenceScreen(ModalScreen[None]):
+    """Shows persistence management state for the active agent."""
+
+    DEFAULT_CSS = """
+    PersistenceScreen {
+        align: center middle;
+    }
+    PersistenceScreen > Vertical {
+        width: 72;
+        height: auto;
+        max-height: 30;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+    PersistenceScreen .section-title {
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_panel", "Close"),
+        Binding("f2", "dismiss_panel", "Close"),
+    ]
+
+    def __init__(self, agent_name: str, agent_dir: Path, **kwargs):
+        super().__init__(**kwargs)
+        self._agent_name = agent_name
+        self._agent_dir = agent_dir
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self._build_content())
+
+    def _build_content(self) -> Text:
+        text = Text()
+        agent = self._agent_name
+        d = self._agent_dir
+
+        text.append(f" Persistence: {agent} ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
+        text.append("\n")
+
+        # --- Health ---
+        text.append("\n Health ", style=f"bold {Gruvbox.BR_AQUA}")
+        text.append("\n")
+        health_path = d / "asdaaas" / "health.json"
+        try:
+            with open(health_path) as f:
+                h = json.load(f)
+            tokens = h.get("totalTokens", "?")
+            ctx_win = h.get("contextWindow", "?")
+            pct = int(tokens / ctx_win * 100) if isinstance(tokens, int) and isinstance(ctx_win, int) else "?"
+            text.append(f"  Context: {tokens}/{ctx_win} ({pct}%)\n", style=Gruvbox.FG)
+            text.append(f"  Status: {h.get('status', '?')}  Detail: {h.get('detail', '')}\n", style=Gruvbox.FG)
+            text.append(f"  Model: {h.get('model', '?')}\n", style=Gruvbox.FG)
+            text.append(f"  Last activity: {h.get('last_activity', '?')}\n", style=Gruvbox.FG)
+        except Exception as e:
+            text.append(f"  (could not read: {e})\n", style=Gruvbox.BR_RED)
+
+        # --- Lab Notebook ---
+        text.append("\n Lab Notebook ", style=f"bold {Gruvbox.BR_GREEN}")
+        text.append("\n")
+        notebook = d / f"lab_notebook_{agent.lower()}.md"
+        if notebook.exists():
+            import os as _os
+            stat = _os.stat(notebook)
+            size_kb = stat.st_size / 1024
+            mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            text.append(f"  File: {notebook.name}\n", style=Gruvbox.FG)
+            text.append(f"  Size: {size_kb:.0f} KB  Modified: {mtime}\n", style=Gruvbox.FG)
+            # Find last ### entry header
+            try:
+                with open(notebook, "rb") as f:
+                    f.seek(max(0, stat.st_size - 2000))
+                    tail = f.read().decode("utf-8", errors="replace")
+                entries = [l for l in tail.split("\n") if l.startswith("### ")]
+                if entries:
+                    text.append(f"  Last entry: {entries[-1][:60]}\n", style=Gruvbox.FG)
+            except Exception:
+                pass
+        else:
+            text.append(f"  (not found: {notebook})\n", style=Gruvbox.BR_RED)
+
+        # --- Notes to Self ---
+        text.append("\n Notes to Self ", style=f"bold {Gruvbox.BR_YELLOW}")
+        text.append("\n")
+        # Try common naming patterns
+        notes = None
+        for pattern in [f"MikeyV_{agent}_notes_to_self.md", f"notes_to_self.md", f"{agent}_notes.md"]:
+            candidate = d / pattern
+            if candidate.exists():
+                notes = candidate
+                break
+        if notes:
+            import os as _os
+            stat = _os.stat(notes)
+            size_kb = stat.st_size / 1024
+            mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            text.append(f"  File: {notes.name}\n", style=Gruvbox.FG)
+            text.append(f"  Size: {size_kb:.0f} KB  Modified: {mtime}\n", style=Gruvbox.FG)
+        else:
+            text.append("  (not found)\n", style=Gruvbox.DARK4)
+
+        # --- Git ---
+        text.append("\n Git ", style=f"bold {Gruvbox.BR_PURPLE}")
+        text.append("\n")
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-3", "--format=%h %ar  %s", "--", str(d)],
+                cwd=str(d.parent), capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split("\n")[:3]:
+                    text.append(f"  {line}\n", style=Gruvbox.FG)
+            else:
+                text.append("  (no recent commits)\n", style=Gruvbox.DARK4)
+        except Exception as e:
+            text.append(f"  (git error: {e})\n", style=Gruvbox.BR_RED)
+
+        # --- Compaction History ---
+        text.append("\n Compaction ", style=f"bold {Gruvbox.BR_ORANGE}")
+        text.append("\n")
+        try:
+            with open(health_path) as f:
+                h = json.load(f)
+            detail = h.get("detail", "")
+            if "compacted" in detail:
+                text.append(f"  {detail}\n", style=Gruvbox.FG)
+            else:
+                text.append(f"  Detail: {detail}\n", style=Gruvbox.FG)
+        except Exception:
+            text.append("  (unknown)\n", style=Gruvbox.DARK4)
+
+        # --- Session Profile ---
+        text.append("\n Session ", style=f"bold {Gruvbox.BR_BLUE}")
+        text.append("\n")
+        profile_dir = d / "asdaaas" / "profile"
+        if profile_dir.exists():
+            latest = profile_dir / f"{agent}_latest.json"
+            jsonl = profile_dir / f"{agent}.jsonl"
+            if jsonl.exists():
+                try:
+                    with open(jsonl, "rb") as f:
+                        turn_count = sum(1 for _ in f)
+                    text.append(f"  Physical turns: {turn_count}\n", style=Gruvbox.FG)
+                except Exception:
+                    pass
+            if latest.exists():
+                try:
+                    with open(latest) as f:
+                        lp = json.load(f)
+                    text.append(f"  Last turn: {lp.get('ts', '?')}\n", style=Gruvbox.FG)
+                    text.append(f"  Duration: {lp.get('wall_seconds', '?')}s\n", style=Gruvbox.FG)
+                except Exception:
+                    pass
+
+        # --- Doorbells ---
+        bells_dir = d / "asdaaas" / "doorbells"
+        if bells_dir.exists():
+            bell_files = list(bells_dir.glob("*.json"))
+            if bell_files:
+                text.append(f"\n  Pending doorbells: {len(bell_files)}\n", style=Gruvbox.BR_YELLOW)
+
+        text.append("\n")
+        text.append(" Press Esc or F2 to close ", style=Gruvbox.DARK4)
+        return text
+
+    def action_dismiss_panel(self) -> None:
+        self.dismiss(None)
+
+
+# =============================================================================
 # Main Application
 # =============================================================================
 
@@ -1161,7 +1423,12 @@ class AsdaaasTUI(App):
     }
 
     UserMessage {
-        margin: 1 0 1 1;
+        margin: 0 0 1 1;
+    }
+
+    TurnSeparator {
+        margin: 1 0 0 0;
+        height: 1;
     }
 
     ThinkingBlock {
@@ -1185,6 +1452,7 @@ class AsdaaasTUI(App):
         Binding("home", "scroll_top", "Top", show=False, priority=True),
         Binding("pageup", "load_history", "Load History", show=False, priority=True),
         Binding("ctrl+n", "next_agent", "Next Agent", show=False),
+        Binding("f2", "show_persistence", "Persistence", show=True),
     ]
 
     def __init__(self, agents: list[str] = None, **kwargs):
@@ -1204,6 +1472,7 @@ class AsdaaasTUI(App):
                 "updates_path": None,  # Cached path to updates.jsonl
                 "loading_history": False,  # Prevents concurrent loads
                 "input_draft": "",  # Saved input text when switching tabs
+                "logical_turn": 0,  # Logical turn counter (user_message_chunk events)
             }
         # Shared state
         self._replay_mode: bool = False
@@ -1338,8 +1607,9 @@ class AsdaaasTUI(App):
             self._handle_slash_command(text)
             return
 
-        # Display the user message
+        # Display the user message — re-enable tail following
         content = self._content_scroll()
+        content._follow_tail = True
         content.mount(UserMessage(text))
         self._scroll_to_bottom()
 
@@ -1428,6 +1698,9 @@ class AsdaaasTUI(App):
                 msg.append_chunk(f"You are: **{name}**\n\nUse `/whoami <name>` to change.")
                 self._scroll_to_bottom()
             return
+        elif cmd == "/mail":
+            self._handle_mail_command(arg, content)
+            return
         elif cmd == "/awareness":
             if not arg:
                 # Show current awareness
@@ -1467,6 +1740,8 @@ class AsdaaasTUI(App):
 | `/todo add <text>` | Add a todo item |
 | `/todo done <n>` | Mark item n as done |
 | `/todo rm <n>` | Remove item n |
+| `/mail <agent> <msg>` | Send localmail to an agent |
+| `/mail all <msg>` | Broadcast to all agents |
 | `/whoami` | Show/change operator name |
 | `/help` | Show this help |
 | `Ctrl+C` | Interrupt agent |
@@ -1568,6 +1843,63 @@ Type anything else to send a message to the agent.
         content.mount(msg)
         msg.append_chunk(display)
         self._scroll_to_bottom()
+
+    def _handle_mail_command(self, arg: str, content: VerticalScroll) -> None:
+        """Handle /mail <agent> <message> and /mail all <message>."""
+        KNOWN_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco"]
+
+        if not arg.strip():
+            m = AgentMessage(); content.mount(m)
+            m.append_chunk(
+                "## Localmail\n\n"
+                "Usage:\n"
+                "- `/mail <agent> <message>` -- send to one agent\n"
+                "- `/mail all <message>` -- broadcast to all agents\n\n"
+                f"Known agents: {', '.join(KNOWN_AGENTS)}"
+            )
+            self._scroll_to_bottom()
+            return
+
+        parts = arg.strip().split(maxsplit=1)
+        target = parts[0]
+        message = parts[1] if len(parts) > 1 else ""
+
+        if not message:
+            self.notify("Usage: /mail <agent> <message>", severity="error")
+            return
+
+        from_name = Config.OPERATOR_NAME or "TUI"
+
+        # Resolve targets
+        if target.lower() == "all":
+            targets = KNOWN_AGENTS
+        else:
+            # Case-insensitive match against known agents
+            matched = [a for a in KNOWN_AGENTS if a.lower() == target.lower()]
+            if not matched:
+                self.notify(
+                    f"Unknown agent '{target}'. Known: {', '.join(KNOWN_AGENTS)}",
+                    severity="error",
+                )
+                return
+            targets = matched
+
+        # Send via localmail
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from localmail import send_mail
+            sent = []
+            for agent in targets:
+                send_mail(from_agent=from_name, to_agent=agent, text=message)
+                sent.append(agent)
+            m = AgentMessage(); content.mount(m)
+            if len(sent) == 1:
+                m.append_chunk(f"Mail sent to **{sent[0]}**: {message}")
+            else:
+                m.append_chunk(f"Mail broadcast to **{', '.join(sent)}**: {message}")
+            self._scroll_to_bottom()
+        except Exception as e:
+            self.notify(f"Mail error: {e}", severity="error")
 
     def _ensure_adapter_attached(self, adapter: str) -> None:
         """Ensure adapter is in direct_attach. Bootstrap if missing."""
@@ -1801,9 +2133,10 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Scroll to bottom on tab switch
+        # Scroll to bottom on tab switch and re-enable following
         try:
             new_scroll = self._content_scroll()
+            new_scroll._follow_tail = True
             new_scroll.scroll_end(animate=False)
             self.set_timer(0.3, lambda: new_scroll.scroll_end(animate=False))
         except NoMatches:
@@ -1838,11 +2171,18 @@ Type anything else to send a message to the agent.
     def action_scroll_bottom(self) -> None:
         try:
             scroll = self._content_scroll()
+            scroll._follow_tail = True
             scroll.scroll_end(animate=False)
         except NoMatches:
             pass
 
     
+
+    def action_show_persistence(self) -> None:
+        """Show persistence management panel for the active agent."""
+        agent_dir = Path.home() / "agents" / self._active_agent
+        if agent_dir.exists():
+            self.push_screen(PersistenceScreen(self._active_agent, agent_dir))
 
     def action_load_history(self) -> None:
         """Load older events (Page Up)."""
@@ -1853,6 +2193,7 @@ Type anything else to send a message to the agent.
         self._load_older_history()
         try:
             scroll = self._content_scroll()
+            scroll._follow_tail = False
             scroll.scroll_home(animate=False)
         except NoMatches:
             pass
@@ -1872,7 +2213,8 @@ Type anything else to send a message to the agent.
                 agent_dir = Path(Config.AGENTS_HOME) / active
                 asdaaas_dir = agent_dir / "asdaaas"
 
-                # Read health
+                # Read health (authoritative for context %)
+                health_pct = None
                 try:
                     health_path = asdaaas_dir / "health.json"
                     with open(health_path) as f:
@@ -1892,6 +2234,14 @@ Type anything else to send a message to the agent.
                         )
                     except NoMatches:
                         pass
+                    # Compute context % from health (more reliable than signals.json)
+                    tokens = health.get("totalTokens")
+                    window = health.get("contextWindow")
+                    if isinstance(tokens, int) and isinstance(window, int) and window > 0:
+                        health_pct = int(tokens / window * 100)
+                        self.call_from_thread(
+                            setattr, header, "context_pct", health_pct
+                        )
                 except Exception:
                     pass
 
@@ -1924,14 +2274,17 @@ Type anything else to send a message to the agent.
                             if signals_path.exists():
                                 with open(signals_path) as f:
                                     signals = json.load(f)
-                                pct = signals.get("contextWindowUsage", 0)
                                 cc = signals.get("compactionCount", 0)
-                                self.call_from_thread(
-                                    setattr, header, "context_pct", pct
-                                )
                                 self.call_from_thread(
                                     setattr, header, "compaction_count", cc
                                 )
+                                # Only use signals.json context % as fallback
+                                # (health.json is authoritative; signals lags on compaction)
+                                if health_pct is None:
+                                    pct = signals.get("contextWindowUsage", 0)
+                                    self.call_from_thread(
+                                        setattr, header, "context_pct", pct
+                                    )
                                 # Get model from summary.json (current_model_id) — more accurate than signals
                                 summary_path = latest / "summary.json"
                                 model = ""
@@ -2081,14 +2434,17 @@ Type anything else to send a message to the agent.
                             lines = lines[-tail_count:]
                         else:
                             state["earliest_offset"] = 0
+                    replay_count = 0
                     for line in lines:
                         try:
                             event = json.loads(line)
                             self.call_from_thread(
                                 self._dispatch_event_for_agent, event, agent_name
                             )
+                            replay_count += 1
                         except json.JSONDecodeError:
                             pass
+                    self._debug(f"REPLAY dispatched={replay_count} lines={len(lines)}")
                     time.sleep(1)
                     self.call_from_thread(self._force_scroll_bottom)
             except Exception:
@@ -2104,9 +2460,26 @@ Type anything else to send a message to the agent.
                     with open(updates_path, "r", errors="replace") as f:
                         f.seek(offset)
                         new_data = f.read()
-                        state["updates_offset"] = f.tell()
 
-                    for line in new_data.strip().split("\n"):
+                    # Only process complete lines (ending with \n).
+                    # A partial last line means grok is mid-write — leave it
+                    # for the next poll by not advancing the offset past it.
+                    if new_data.endswith("\n"):
+                        state["updates_offset"] = offset + len(new_data.encode("utf-8"))
+                        lines = new_data.strip().split("\n")
+                    else:
+                        last_nl = new_data.rfind("\n")
+                        if last_nl == -1:
+                            # No complete line yet — wait for more data
+                            lines = []
+                        else:
+                            complete = new_data[:last_nl + 1]
+                            state["updates_offset"] = offset + len(complete.encode("utf-8"))
+                            lines = complete.strip().split("\n")
+
+                    parsed_count = 0
+                    skip_count = 0
+                    for line in lines:
                         if not line.strip():
                             continue
                         try:
@@ -2114,8 +2487,10 @@ Type anything else to send a message to the agent.
                             self.call_from_thread(
                                 self._dispatch_event_for_agent, event, agent_name
                             )
+                            parsed_count += 1
                         except json.JSONDecodeError:
-                            pass
+                            skip_count += 1
+                    self._debug(f"TAIL_POLL read={len(new_data)} lines={len(lines)} parsed={parsed_count} skipped={skip_count} offset={state['updates_offset']}")
                 elif current_size < offset:
                     state["updates_offset"] = 0
 
@@ -2137,15 +2512,31 @@ Type anything else to send a message to the agent.
         """Dispatch an event, temporarily switching context to the target agent."""
         saved = self._active_agent
         self._active_agent = agent_name
+        self._dispatching_agent = agent_name
         try:
             self._dispatch_event(event)
         finally:
             self._active_agent = saved
+            self._dispatching_agent = None
+
+    _debug_log = None  # Set to a file path to enable event logging
+
+    @classmethod
+    def enable_debug_log(cls, path="/tmp/tui_dispatch.log"):
+        cls._debug_log = open(path, "w")
+
+    def _debug(self, msg):
+        if self._debug_log:
+            import time as _t
+            self._debug_log.write(f"{_t.time():.3f} {msg}\n")
+            self._debug_log.flush()
 
     def _dispatch_event(self, event: dict) -> None:
         """Dispatch an updates.jsonl event to the appropriate renderer."""
         update = event.get("params", {}).get("update", {})
         event_type = update.get("sessionUpdate", "")
+        # Stash event timestamp for turn separators
+        self._last_event_ts = event.get("timestamp")
 
         if event_type == "agent_message_chunk":
             self._on_agent_message_chunk(update)
@@ -2186,11 +2577,14 @@ Type anything else to send a message to the agent.
 
         content = self._content_scroll()
 
-        if self._current_agent_msg is None:
+        was_none = self._current_agent_msg is None
+        if was_none:
             self._current_agent_msg = AgentMessage()
             content.mount(self._current_agent_msg)
+            content.refresh(layout=True)
 
         self._current_agent_msg.append_chunk(text)
+        self._debug(f"MSG_CHUNK len={len(text)} total={len(self._current_agent_msg._text)} new_widget={was_none}")
         self._scroll_to_bottom()
 
     def _on_agent_thought_chunk(self, update: dict) -> None:
@@ -2206,6 +2600,7 @@ Type anything else to send a message to the agent.
             self._current_thinking = ThinkingBlock()
             self._current_thinking.display = self._show_thinking
             content.mount(self._current_thinking)
+            content.refresh(layout=True)
 
         self._current_thinking.append_chunk(text)
         if self._show_thinking:
@@ -2224,6 +2619,8 @@ Type anything else to send a message to the agent.
         panel = ToolCallPanel(tool_id, title)
         self._tool_panels[tool_id] = panel
         content.mount(panel)
+        content.refresh(layout=True)
+        self._debug(f"TOOL_CALL id={tool_id[:8]} title={title}")
         self._scroll_to_bottom()
 
     def _on_tool_call_update(self, update: dict) -> None:
@@ -2244,6 +2641,7 @@ Type anything else to send a message to the agent.
             self._tool_panels[tool_id] = panel
             content = self._content_scroll()
             content.mount(panel)
+            content.refresh(layout=True)
 
         # Update kind and title if provided
         if kind:
@@ -2267,6 +2665,8 @@ Type anything else to send a message to the agent.
                 path = item.get("path", "")
                 panel.set_output(f"[diff] {path}")
 
+        out_len = len(panel.tool_output) if panel.tool_output else 0
+        self._debug(f"TOOL_UPDATE id={tool_id[:8]} status={status} out_len={out_len} collapsed={panel._collapsed}")
         self._scroll_to_bottom()
 
     def _on_plan(self, update: dict) -> None:
@@ -2308,14 +2708,38 @@ Type anything else to send a message to the agent.
             self._last_sent_text = None  # Clear so we only skip once
             return
 
-        # Display user messages from other sources (IRC, asdaaas injection, etc.)
+        # Increment logical turn counter and insert separator
+        state = self._agent_state[self._active_agent]
+        state["logical_turn"] += 1
+        turn_num = state["logical_turn"]
+        trigger = classify_turn_trigger(text)
+
+        # Format timestamp from update metadata or current time
+        ts_str = ""
+        meta = update.get("_meta", {})
+        if meta.get("ts"):
+            ts_str = meta["ts"]
+        elif hasattr(self, "_last_event_ts") and self._last_event_ts:
+            ts_str = datetime.datetime.fromtimestamp(
+                self._last_event_ts
+            ).strftime("%H:%M:%S")
+
         # End current agent message block
         self._current_agent_msg = None
         self._current_thinking = None
 
         content = self._content_scroll()
+        content.mount(TurnSeparator(turn_num, trigger, ts_str))
         content.mount(UserMessage(text))
+        content.refresh(layout=True)
         self._scroll_to_bottom()
+
+        # Update header
+        try:
+            header = self.query_one("#agent-header", AgentHeader)
+            header.turn_logical = turn_num
+        except Exception:
+            pass
 
     def _on_task_backgrounded(self, update: dict) -> None:
         """Handle task backgrounded notification."""
@@ -2391,7 +2815,7 @@ Type anything else to send a message to the agent.
             return
 
         state["loading_history"] = True
-        batch_size = 1  # Load 1 event per scroll tick
+        batch_size = 15  # Events loaded per scroll/PageUp
 
         try:
             # Read backwards from earliest_offset
@@ -2481,24 +2905,67 @@ Type anything else to send a message to the agent.
         finally:
             state["loading_history"] = False
 
-    
+    _pending_scroll_timer = None
+
+    _dispatching_agent = None
 
     def _scroll_to_bottom(self) -> None:
-        """Scroll the content area to the bottom (only if visible)."""
-        # Skip per-event scrolling during replay bulk load
+        """Scroll the content area to the bottom (only for the visible agent).
+
+        Debounced: multiple calls in rapid succession result in a single
+        deferred scroll, giving Textual's compositor time to recalculate
+        layout before we read virtual_size.
+
+        Skips scrolling if the event came from a background agent's tailer
+        (prevents Sr's activity from snapping Trip's scroll position).
+        """
         if self._replay_mode and not self._replay_done:
+            return
+        # If dispatching for a non-visible agent, skip scroll
+        if self._dispatching_agent and self._dispatching_agent != self._active_agent:
+            return
+        # Respect user's scroll position — don't snap back if they scrolled up
+        try:
+            scroll = self._content_scroll()
+            if not scroll._follow_tail:
+                return
+        except NoMatches:
+            return
+        if self._pending_scroll_timer is None:
+            target = self._active_agent
+            self._pending_scroll_timer = self.set_timer(
+                0.05, lambda: self._do_deferred_scroll(target)
+            )
+
+    def _do_deferred_scroll(self, target_agent: str = None) -> None:
+        """Execute the deferred scroll after compositor has updated layout."""
+        self._pending_scroll_timer = None
+        # If active agent changed since we scheduled (background dispatch restored
+        # _active_agent after the timer was set), skip — wrong scroll target.
+        if target_agent and target_agent != self._active_agent:
             return
         try:
             scroll = self._content_scroll()
-            if scroll.display:
+            if scroll.display and scroll._follow_tail:
+                scroll.scroll_end(animate=False)
+                self.set_timer(0.2, self._follow_up_scroll)
+        except NoMatches:
+            pass
+
+    def _follow_up_scroll(self) -> None:
+        """Second scroll to catch layout changes from recently mounted widgets."""
+        try:
+            scroll = self._content_scroll()
+            if scroll.display and scroll._follow_tail:
                 scroll.scroll_end(animate=False)
         except NoMatches:
             pass
 
     def _force_scroll_bottom(self) -> None:
-        """Force scroll to bottom — used after replay completes."""
+        """Force scroll to bottom -- used after replay completes."""
         try:
             scroll = self._content_scroll()
+            scroll._follow_tail = True
             scroll.scroll_end(animate=False)
             # Also schedule a delayed one in case widgets are still mounting
             self.set_timer(0.5, lambda: scroll.scroll_end(animate=False))
@@ -2516,8 +2983,8 @@ def main():
         description="asdaaas TUI — Full-screen development interface for agent sessions"
     )
     parser.add_argument(
-        "--agent", "-a", default="Trip",
-        help="Agent name (default: Trip)"
+        "--agent", "-a", required=True,
+        help="Agent name (e.g. Trip, Sr, Jr)"
     )
     parser.add_argument(
         "--agents-home", default=os.path.expanduser("~/agents"),
@@ -2542,6 +3009,10 @@ def main():
     parser.add_argument(
         "--sessions-dir", default=None,
         help="Grok sessions directory (default: auto-detect ~/.grok/sessions/ or .grok-users/)"
+    )
+    parser.add_argument(
+        "--debug-log", default=None,
+        help="Path to write dispatch debug log (e.g. /tmp/tui_dispatch.log)"
     )
     args = parser.parse_args()
 
@@ -2578,6 +3049,9 @@ def main():
     all_agents.insert(0, Config.AGENT_NAME)
 
     app = AsdaaasTUI(agents=all_agents)
+
+    if args.debug_log:
+        AsdaaasTUI.enable_debug_log(args.debug_log)
 
     if args.replay or args.tail:
         app._replay_mode = True

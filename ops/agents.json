@@ -5,7 +5,8 @@
     "agents_dir": "/home/eric/agents",
     "log_dir": "/tmp",
     "running_agents_file": "/home/eric/asdaaas/running_agents.json",
-    "debug": true
+    "debug": true,
+    "grok_binary": "/home/eric/.grok/bin/archive/grok-0.1.174.et"
   },
   "agents": {
     "Sr": {

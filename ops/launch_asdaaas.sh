@@ -26,6 +26,7 @@ ASDAAAS_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['se
 LOG_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['log_dir'])")
 RUNNING_AGENTS_FILE=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['running_agents_file'])")
 DEBUG=$(python3 -c "import json; c=json.load(open('$CONFIG')); print('1' if c['settings'].get('debug', False) else '')")
+GROK_BINARY=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings'].get('grok_binary', ''))")
 ASDAAAS="$ASDAAAS_DIR/asdaaas.py"
 
 # Determine which agents to launch
@@ -92,7 +93,11 @@ for agent in "${AGENTS[@]}"; do
     if [ -n "$model" ]; then
         MODEL_FLAG="--model $model"
     fi
-    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home" $MODEL_FLAG > "$log_file" 2>&1 &
+    GROK_BIN_FLAG=""
+    if [ -n "$GROK_BINARY" ]; then
+        GROK_BIN_FLAG="--grok-binary $GROK_BINARY"
+    fi
+    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home" $MODEL_FLAG $GROK_BIN_FLAG > "$log_file" 2>&1 &
     echo "$agent: PID $! (session=$session, model=${model:-default}, log=$log_file)"
 
     if [ -n "$AGENT_NAMES_CSV" ]; then

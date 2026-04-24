@@ -2692,6 +2692,27 @@ class TestDelayInterruptSkipsContinue:
         # Still only one
         assert len(list(bell_dir.glob("cont_*.json"))) == 1
 
+    def test_cleanup_continue_doorbells_on_delay_until_event(self, hub_dir):
+        """Bug_0003: delay until_event must remove existing continue doorbells.
+
+        Without this, persistent continue bells keep re-delivering every
+        iteration even though delay_until_event prevents new ones."""
+        bell_dir = hub_dir.parent / "agents" / "Sr" / "asdaaas" / "doorbells"
+        for f in bell_dir.glob("cont_*.json"):
+            os.unlink(f)
+
+        # Queue a continue doorbell
+        asdaaas.queue_continue_doorbell("Sr")
+        assert len(list(bell_dir.glob("cont_*.json"))) == 1
+
+        # Cleanup should remove it
+        asdaaas._cleanup_continue_doorbells("Sr")
+        assert len(list(bell_dir.glob("cont_*.json"))) == 0
+
+        # queue_continue_doorbell works again (file was really removed)
+        result = asdaaas.queue_continue_doorbell("Sr")
+        assert result is True
+
     @pytest.mark.asyncio
     async def test_full_pattern_interrupted_no_continue(self, hub_dir, write_awareness):
         """END-TO-END: Simulates the full pattern from the main loop.
